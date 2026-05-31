@@ -1,0 +1,23 @@
+[package]
+name = "pm_structuring"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[test]]
+name = "pm_structuring_behavior"
+path = "../../tests/behavioral/pm_structuring_behavior.rs"
+
+[[test]]
+name = "pm_structuring_replay"
+path = "../../tests/replay/pm_structuring_replay.rs"

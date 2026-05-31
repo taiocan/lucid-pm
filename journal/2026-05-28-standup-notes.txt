@@ -1,0 +1,5 @@
+Standup 2026-05-28
+
+Alice: finished ontology_suggest Stage 9. Will start on Logseq export v2 today.
+Bob: blocked on CI config — waiting for DevOps to grant pipeline permissions. Escalation needed.
+Carol: reviewed the multi-project registry stale data issue. Root cause identified — missing cache invalidation on rename. Fix is low complexity, will submit PR today.

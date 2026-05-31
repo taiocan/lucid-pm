@@ -1,0 +1,2 @@
+{"event_id":"fd-event-0001","event_type":"FolderScanRequested","timestamp":1748200001000,"correlation_id":"fd-corr-id-0002","source_module":"pm_structuring","payload":{"folder_path":"nonexistent_folder","auto_confirm":false}}
+{"event_id":"fd-event-0002","event_type":"ExtractionFailedFolderNotFound","timestamp":1748200002000,"correlation_id":"fd-corr-id-0002","source_module":"pm_structuring","payload":{"failure_reason":"folder_not_found","folder_path":"nonexistent_folder"}}

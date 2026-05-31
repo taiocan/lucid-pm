@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# lucid — LucidPM unified CLI
+# Dispatches to individual feature binaries installed alongside this script.
+
+LUCID_BIN_DIR="$(dirname "$(realpath "$0")")"
+
+CMD="${1:-}"
+shift 2>/dev/null || true
+
+case "$CMD" in
+  extract)   exec "$LUCID_BIN_DIR/pm_structuring" "$@" ;;
+  state)     exec "$LUCID_BIN_DIR/project_state" "$@" ;;
+  status)    exec "$LUCID_BIN_DIR/item_status" "$@" ;;
+  link)      exec "$LUCID_BIN_DIR/item_links" "$@" ;;
+  export)    exec "$LUCID_BIN_DIR/logseq_export" "$@" ;;
+  sync)      exec "$LUCID_BIN_DIR/logseq_sync" "$@" ;;
+  project)   exec "$LUCID_BIN_DIR/multi_project" "$@" ;;
+  priority)  exec "$LUCID_BIN_DIR/priority_view" "$@" ;;
+  report)    exec "$LUCID_BIN_DIR/report_export" "$@" ;;
+  suggest)   exec "$LUCID_BIN_DIR/ontology_suggest" "$@" ;;
+  journal)   exec "$LUCID_BIN_DIR/journal" "$@" ;;
+  schema)    exec "$LUCID_BIN_DIR/project_schema" "$@" ;;
+  version)
+    echo "LucidPM lucid CLI"
+    ;;
+  help|"")
+    cat <<'EOF'
+LucidPM — project management assistant
+
+Usage: lucid <command> [args]
+
+Commands:
+  extract    Extract PM items from text or a folder of notes
+               lucid extract                              (interactive stdin)
+               lucid extract --folder journal/ --yes      (batch, auto-confirm)
+
+  state      View and manage the project record
+               lucid state incorporate <session_id>       (add confirmed session)
+               lucid state view                           (show all items)
+
+  status     Set status or priority on a project item
+               lucid status set-status <item_id> <status>
+               lucid status set-priority <item_id> <high|medium|low>
+               lucid status get <item_id>
+
+  link       Create and manage typed links between items
+               lucid link add <source_id> <link_type> <target_id>
+               lucid link remove <source_id> <link_type> <target_id>
+               lucid link list
+             Valid link types: blocks, affects, assigned_to, mitigated_by,
+                               escalates_to, related_to
+
+  export     Export the project record to Logseq pages
+               lucid export --output-dir logseq/pages
+
+  sync       Sync status/priority changes from Logseq back into the record
+               lucid sync --graph logseq
+
+  project    Create and manage named projects
+               lucid project init <name> --dir <path>    (create new project)
+               lucid project list                         (list all projects)
+               lucid project open <name>                  (print project path)
+
+  priority   View items ranked by priority (all optional filters)
+               lucid priority
+               lucid priority --type task
+               lucid priority --status open
+               lucid priority --priority high
+
+  report     Generate a project report
+               lucid report --type full
+               lucid report --type weekly
+               lucid report --type risk-register
+               lucid report --type stakeholders
+
+  suggest    AI-powered enrichment proposals
+               lucid suggest propose
+               lucid suggest confirm <review_id> --accept-all
+               lucid suggest confirm <review_id> --accept p-001,p-002
+
+  journal    Free-form notes and meeting minutes
+               lucid journal new --title "standup 2026-05-29"
+               lucid journal list
+               lucid journal open <filename>
+
+  schema     Manage the project vocabulary schema
+               lucid schema validate                      (check project-schema.yaml)
+               lucid schema show                          (print resolved vocabulary)
+               lucid schema validate --project-dir <path> (explicit project dir)
+
+  version    Print version info
+  help       Show this message
+
+EOF
+    ;;
+  *)
+    echo "lucid: unknown command '$CMD'" >&2
+    echo "Run 'lucid help' for usage." >&2
+    exit 1
+    ;;
+esac

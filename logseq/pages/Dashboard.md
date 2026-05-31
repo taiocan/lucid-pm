@@ -1,0 +1,76 @@
+query-properties:: [:page :status :deadline :blocked-by]
+#+BEGIN_QUERY
+{
+ :title "Pending Milestones"
+ :query [
+   :find (pull ?p [*])
+   :where
+   [?p :block/properties ?props]
+   [(get ?props :type) ?type]
+   [(= ?type "milestone")]
+   [(get ?props :status) ?status]
+   [(contains? #{"active"} ?status)]
+ ]
+}
+#+END_QUERY
+
+-
+- query-properties:: [:page :priority :assigned-to :deadline :blocked-by :blocking :blocked-by-issues]
+  query-sort-by:: page
+  query-sort-desc:: false
+  #+BEGIN_QUERY
+    {
+     :title "Active Work Packages"
+     :query [
+       :find (pull ?p [*])
+       :where
+       [?p :block/properties ?props]
+       [(get ?props :type) ?type]
+       [(= ?type "work package")]
+       [(get ?props :status) ?status]
+       [(contains? #{"active" "DOING" "WAITING"} ?status)]
+     ]
+    }
+    #+END_QUERY
+- #+BEGIN_QUERY
+  {
+   :title "Open Tasks"
+   :query [
+     :find (pull ?b [*])
+     :where
+     [?b :block/marker ?marker]
+     [(contains? #{"TODO" "DOING" "NOW" "WAITING" "LATER"} ?marker)]
+   ]
+  }
+  #+END_QUERY
+-
+- query-properties:: [:page :status :priority]
+  #+BEGIN_QUERY
+  {
+   :title "Risk Pages"
+   :query [
+     :find (pull ?p [*])
+     :where
+     [?p :block/properties ?props]
+     [(get ?props :type) ?type]
+     [(= ?type "risk")]
+   ]
+  }
+  #+END_QUERY
+- query-properties:: [:page :phone :email :status :role]
+  #+BEGIN_QUERY
+  {
+   :title "Active Stakeholders"
+   :query [
+     :find (pull ?p [*])
+     :where
+     [?p :block/properties ?props]
+     [(get ?props :type) ?type]
+     [(= ?type "stakeholder")]
+     [(get ?props :status) ?status]
+     [(= ?status "active")]
+   ]
+  }
+  #+END_QUERY
+-
+-

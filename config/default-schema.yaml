@@ -1,0 +1,111 @@
+# LucidPM default project vocabulary
+# Installed to: ~/.lucidpm/default-schema.yaml
+schemaVersion: 1
+
+properties:
+  status:
+    type: enum
+  priority:
+    type: enum
+    values:
+      - low
+      - medium
+      - high
+  deadline:
+    type: date
+  scheduled:
+    type: date
+
+statuses:
+  active:
+  waiting:
+  done:
+  cancelled:
+
+pageTypes:
+  Stakeholder:
+    uses:
+      - status
+  Milestone:
+    uses:
+      - status
+      - deadline
+  WorkPackage:
+    uses:
+      - status
+      - priority
+      - deadline
+  Issue:
+    uses:
+      - status
+      - deadline
+  Risk:
+    uses:
+      - status
+      - deadline
+
+blockTypes:
+  Task:
+    markers:
+      TODO: active
+      DOING: active
+      NOW: active
+      WAITING: waiting
+      LATER: waiting
+      DONE: done
+    uses:
+      - scheduled
+      - deadline
+
+relations:
+  assignedTo:
+    source:
+      - WorkPackage
+      - Task
+      - Issue
+    target:
+      - Stakeholder
+  blocks:
+    source:
+      - WorkPackage
+      - Task
+      - Issue
+    target:
+      - WorkPackage
+      - Task
+      - Milestone
+  affects:
+    source:
+      - Risk
+      - Issue
+    target:
+      - WorkPackage
+      - Task
+      - Milestone
+      - Stakeholder
+  relatedTo:
+    source:
+      - any
+    target:
+      - any
+
+renderers:
+  logseq:
+    relations:
+      assignedTo:
+        forwardLabel: "Assigned To"
+        inverseLabel: "Owns"
+      blocks:
+        forwardLabel: "Blocks"
+        inverseLabel: "Blocked By"
+      affects:
+        forwardLabel: "Affects"
+        inverseLabel: "Affected By"
+      relatedTo:
+        forwardLabel: "Related To"
+        inverseLabel: "Related To"
+    properties:
+      deadline: deadline
+      scheduled: scheduled
+      status: status
+      priority: priority
