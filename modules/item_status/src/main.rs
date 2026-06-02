@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use project_schema::{load_and_validate, marker_to_status, resolve_type, ProjectSchema};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
@@ -23,7 +24,7 @@ enum Commands {
     SetStatus {
         /// Item ID from the project record
         item_id: String,
-        /// New status value (must be valid for the item's type)
+        /// New status value (must be valid for the item's type per active vocabulary)
         status: String,
     },
     /// Set the priority of a recorded project item
@@ -47,18 +48,42 @@ struct RecordedItem {
     description: String,
 }
 
-fn valid_statuses_for_type(item_type: &str) -> &'static [&'static str] {
-    match item_type {
-        "task"        => &["todo", "doing", "done", "waiting", "cancelled"],
-        "milestone"   => &["pending", "achieved", "missed"],
-        "risk"        => &["open", "mitigated", "accepted", "closed"],
-        "issue"       => &["open", "in_progress", "resolved", "closed"],
-        "stakeholder" => &["active", "inactive"],
-        _             => &[],
-    }
+const VALID_PRIORITIES: &[&str] = &["high", "medium", "low"];
+
+// Check if `status` is valid for `item_type` per the active vocabulary.
+// Contract: a type with an empty allowedStatuses set has no valid statuses.
+fn vocabulary_allows_status(schema: &ProjectSchema, item_type: &str, status: &str) -> bool {
+    let canonical = match resolve_type(schema, item_type) {
+        Some(t) => t,
+        None => return false,
+    };
+    schema
+        .page_types
+        .get(canonical)
+        .map(|def| {
+            !def.allowed_statuses.is_empty()
+                && def.allowed_statuses.iter().any(|s| s == status)
+        })
+        .unwrap_or(false)
 }
 
-const VALID_PRIORITIES: &[&str] = &["high", "medium", "low"];
+// Return the list of valid statuses for `item_type` from the active vocabulary.
+fn valid_statuses_from_vocabulary(schema: &ProjectSchema, item_type: &str) -> Vec<String> {
+    let canonical = match resolve_type(schema, item_type) {
+        Some(t) => t,
+        None => return vec![],
+    };
+    schema
+        .page_types
+        .get(canonical)
+        .map(|def| def.allowed_statuses.clone())
+        .unwrap_or_default()
+}
+
+// Extract the first whitespace-delimited token from text as a potential task marker.
+fn extract_marker(text: &str) -> Option<String> {
+    text.split_whitespace().next().map(String::from)
+}
 
 fn timestamp_ms() -> u64 {
     SystemTime::now()
@@ -86,7 +111,6 @@ fn emit_event(event_type: &str, correlation_id: &str, payload: Value) {
     writeln!(file, "{}", event).expect("Failed to write event");
 }
 
-/// Return all sessions that project_state has incorporated, in emission order.
 fn read_incorporated_sessions() -> Result<Vec<String>> {
     if !Path::new(EVENTS_FILE).exists() {
         return Ok(vec![]);
@@ -108,7 +132,6 @@ fn read_incorporated_sessions() -> Result<Vec<String>> {
     Ok(sessions)
 }
 
-/// Return confirmed items from a pm_structuring session by scanning the event log.
 fn find_confirmed_items(session_id: &str) -> Result<Vec<RecordedItem>> {
     let file = fs::File::open(EVENTS_FILE)
         .with_context(|| format!("opening {}", EVENTS_FILE))?;
@@ -155,7 +178,6 @@ fn find_confirmed_items(session_id: &str) -> Result<Vec<RecordedItem>> {
     Ok(items)
 }
 
-/// Return all items currently in the project record.
 fn read_all_record_items() -> Result<Vec<RecordedItem>> {
     let sessions = read_incorporated_sessions()?;
     let mut all = Vec::new();
@@ -165,12 +187,10 @@ fn read_all_record_items() -> Result<Vec<RecordedItem>> {
     Ok(all)
 }
 
-/// Return the item if it exists in the project record, None otherwise.
 fn find_item(item_id: &str) -> Result<Option<RecordedItem>> {
     Ok(read_all_record_items()?.into_iter().find(|i| i.item_id == item_id))
 }
 
-/// Return the most recently recorded status for item_id, or None if never set.
 fn current_status(item_id: &str) -> Result<Option<String>> {
     if !Path::new(EVENTS_FILE).exists() { return Ok(None); }
     let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
@@ -190,7 +210,6 @@ fn current_status(item_id: &str) -> Result<Option<String>> {
     Ok(last)
 }
 
-/// Return the most recently recorded priority for item_id, or None if never set.
 fn current_priority(item_id: &str) -> Result<Option<String>> {
     if !Path::new(EVENTS_FILE).exists() { return Ok(None); }
     let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
@@ -210,8 +229,6 @@ fn current_priority(item_id: &str) -> Result<Option<String>> {
     Ok(last)
 }
 
-/// Return the proposed status and priority from extraction for item_id,
-/// but only if the extraction was confirmed (ExtractionConfirmed includes the item_id).
 fn proposed_values_from_extraction(item_id: &str) -> Result<(Option<String>, Option<String>)> {
     if !Path::new(EVENTS_FILE).exists() { return Ok((None, None)); }
     let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
@@ -260,6 +277,13 @@ fn proposed_values_from_extraction(item_id: &str) -> Result<(Option<String>, Opt
 fn cmd_set_status(item_id: &str, status: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
 
+    // Schema load before any item_status event — abort if schema invalid (FP1: SchemaInvalid).
+    // project_schema emits the failure event and prints to stderr.
+    let schema = match load_and_validate(Path::new("."), Path::new(EVENTS_FILE), &correlation_id) {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
     emit_event("StatusUpdateRequested", &correlation_id, json!({
         "item_id": item_id,
         "requested_status": status,
@@ -278,14 +302,18 @@ fn cmd_set_status(item_id: &str, status: &str) -> Result<()> {
         }
     };
 
-    // Contract failure: InvalidStatusForType
-    let valid = valid_statuses_for_type(&item.item_type);
-    if !valid.contains(&status) {
+    // Contract failure: InvalidStatusForType — validated against active vocabulary.
+    // Covers empty allowedStatuses (custom type with no status vocabulary).
+    if !vocabulary_allows_status(&schema, &item.item_type, status) {
+        let valid = valid_statuses_from_vocabulary(&schema, &item.item_type);
+        let valid_display = if valid.is_empty() {
+            "(none — type has no status vocabulary)".to_string()
+        } else {
+            valid.join(", ")
+        };
         println!(
             "Status '{}' is not valid for item type '{}'. Valid values: {}",
-            status,
-            item.item_type,
-            valid.join(", ")
+            status, item.item_type, valid_display
         );
         emit_event("StatusUpdateFailedInvalidStatus", &correlation_id, json!({
             "failure_reason": "invalid_status_for_type",
@@ -318,6 +346,14 @@ fn cmd_set_status(item_id: &str, status: &str) -> Result<()> {
 fn cmd_set_priority(item_id: &str, priority: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
 
+    // Schema load before any item_status event — abort if schema invalid (FP1: SchemaInvalid).
+    // Priority values are not schema-driven in this release, but schema load is required
+    // because item type resolution depends on a successfully loaded vocabulary.
+    let _schema = match load_and_validate(Path::new("."), Path::new(EVENTS_FILE), &correlation_id) {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
     emit_event("PriorityUpdateRequested", &correlation_id, json!({
         "item_id": item_id,
         "requested_priority": priority,
@@ -336,7 +372,7 @@ fn cmd_set_priority(item_id: &str, priority: &str) -> Result<()> {
         }
     };
 
-    // Contract failure: InvalidPriorityValue
+    // Contract failure: InvalidPriorityValue (hardcoded — not schema-driven in this release)
     if !VALID_PRIORITIES.contains(&priority) {
         println!(
             "Priority '{}' is not valid. Valid values: {}",
@@ -372,6 +408,13 @@ fn cmd_set_priority(item_id: &str, priority: &str) -> Result<()> {
 fn cmd_get(item_id: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
 
+    // Schema load before any item_status event — abort if schema invalid (FP1: SchemaInvalid).
+    // Schema is required for marker resolution and stale-status detection.
+    let schema = match load_and_validate(Path::new("."), Path::new(EVENTS_FILE), &correlation_id) {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
     emit_event("ItemStatusQueried", &correlation_id, json!({
         "item_id": item_id,
     }));
@@ -391,18 +434,52 @@ fn cmd_get(item_id: &str) -> Result<()> {
 
     let explicit_status   = current_status(item_id)?;
     let explicit_priority = current_priority(item_id)?;
-
     let (prop_status, prop_priority) = proposed_values_from_extraction(item_id)?;
 
-    let effective_status   = explicit_status.as_ref().or(prop_status.as_ref()).cloned();
+    // Effective status resolution chain (contract invariant, highest to lowest priority):
+    //   1. explicit  — most recent ItemStatusUpdated event
+    //   2. marker_derived — task marker in vocabulary mapping, no explicit event
+    //   3. proposed  — proposed_status from extraction
+    //   4. null
+    let (effective_status, status_source): (Option<String>, Option<&str>) =
+        if let Some(s) = explicit_status {
+            (Some(s), Some("explicit"))
+        } else if let Some(marker) = extract_marker(&item.description) {
+            if let Some(mapped) = marker_to_status(&schema, &marker) {
+                (Some(mapped.to_string()), Some("marker_derived"))
+            } else {
+                // Unmapped marker — fall through to proposed value, no failure signal
+                (prop_status.clone(), prop_status.as_ref().map(|_| "proposed"))
+            }
+        } else {
+            (prop_status.clone(), prop_status.as_ref().map(|_| "proposed"))
+        };
+
+    // Stale status check: only when the effective status is an explicit recorded value.
+    // Emit ItemStatusUnrecognized (non-failure, exactly once per get) before ItemStatusReturned.
+    if status_source == Some("explicit") {
+        if let Some(ref s) = effective_status {
+            if !vocabulary_allows_status(&schema, &item.item_type, s) {
+                emit_event("ItemStatusUnrecognized", &correlation_id, json!({
+                    "item_id": item_id,
+                    "item_type": item.item_type,
+                    "recorded_status": s,
+                }));
+                eprintln!(
+                    "warning: recorded status '{}' for item '{}' is no longer recognized by the active vocabulary",
+                    s, &item_id[..8.min(item_id.len())]
+                );
+            }
+        }
+    }
+
     let effective_priority = explicit_priority.as_ref().or(prop_priority.as_ref()).cloned();
 
-    let status_display = match explicit_status.as_deref() {
-        Some(s) => s.to_string(),
-        None    => match prop_status.as_deref() {
-            Some(s) => format!("{} (proposed)", s),
-            None    => "(not set)".to_string(),
-        },
+    let status_display = match status_source {
+        Some("explicit")      => effective_status.as_deref().unwrap_or("(not set)").to_string(),
+        Some("marker_derived") => format!("{} (marker)", effective_status.as_deref().unwrap_or("")),
+        Some("proposed")      => format!("{} (proposed)", effective_status.as_deref().unwrap_or("")),
+        _                     => "(not set)".to_string(),
     };
     let priority_display = match explicit_priority.as_deref() {
         Some(p) => p.to_string(),
@@ -426,6 +503,7 @@ fn cmd_get(item_id: &str) -> Result<()> {
         "item_type": item.item_type,
         "current_status": effective_status,
         "current_priority": effective_priority,
+        "status_source": status_source,
     }));
 
     Ok(())

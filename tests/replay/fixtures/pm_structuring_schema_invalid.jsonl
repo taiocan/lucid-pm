@@ -1,0 +1,1 @@
+{"event_id":"a1000000-0000-0000-0001-000000000001","event_type":"SchemaParseError","timestamp":1748000000000,"correlation_id":"b2000000-0000-0000-0001-000000000001","source_module":"project_schema","payload":{"error_detail":"yaml scanner error: did not find expected <document start> at line 1 column 5"}}

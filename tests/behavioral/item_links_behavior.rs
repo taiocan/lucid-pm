@@ -1,8 +1,9 @@
-//! Behavioral tests for item_links.
+//! Behavioral tests for item_links and item_links_schema_integration.
 //!
 //! Tests verify observable outcomes: events emitted, payload shapes, link
-//! visibility after add/remove, failure modes, and invariants.
-//! All assertions reference event names from events/item_links_schema.md exactly.
+//! visibility after add/remove, failure modes, and schema integration invariants.
+//! All assertions reference event names from events/item_links_schema.md and
+//! events/item_links_schema_integration_schema.md exactly.
 
 use serde_json::{json, Value};
 use std::fs;
@@ -18,6 +19,10 @@ fn setup_temp_dir() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir(dir.path().join("events")).unwrap();
     dir
+}
+
+fn write_project_schema(dir: &TempDir, yaml: &str) {
+    fs::write(dir.path().join("project-schema.yaml"), yaml).unwrap();
 }
 
 fn seed_incorporated_items(dir: &TempDir, session_id: &str, items: &[(&str, &str, &str)]) {
@@ -50,6 +55,22 @@ fn seed_incorporated_items(dir: &TempDir, session_id: &str, items: &[(&str, &str
     })).unwrap();
 }
 
+fn seed_item_linked(dir: &TempDir, source_id: &str, link_type: &str, target_id: &str) {
+    let path = dir.path().join("events/runtime_events.jsonl");
+    let mut file = fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
+    writeln!(file, "{}", json!({
+        "event_id": format!("seed-link-{}", &source_id[..8]),
+        "event_type": "ItemLinked", "timestamp": 1748000010000u64,
+        "correlation_id": "00000000-0000-0000-0000-000000000002",
+        "source_module": "item_links",
+        "payload": {
+            "source_id": source_id, "source_type": "task",
+            "link_type": link_type,
+            "target_id": target_id, "target_type": "milestone"
+        }
+    })).unwrap();
+}
+
 fn run_binary(dir: &TempDir, args: &[&str]) -> std::process::Output {
     Command::new(binary_path())
         .current_dir(dir.path())
@@ -61,6 +82,7 @@ fn run_binary(dir: &TempDir, args: &[&str]) -> std::process::Output {
         .expect("Failed to run binary")
 }
 
+/// Events from item_links module only.
 fn read_il_events(dir: &TempDir) -> Vec<Value> {
     let path = dir.path().join("events/runtime_events.jsonl");
     if !path.exists() { return vec![]; }
@@ -69,6 +91,17 @@ fn read_il_events(dir: &TempDir) -> Vec<Value> {
         .filter(|l| !l.is_empty())
         .map(|l| serde_json::from_str::<Value>(l).unwrap())
         .filter(|e| e["source_module"].as_str() == Some("item_links"))
+        .collect()
+}
+
+/// All events, including cross-module (project_schema, etc.).
+fn read_all_events(dir: &TempDir) -> Vec<Value> {
+    let path = dir.path().join("events/runtime_events.jsonl");
+    if !path.exists() { return vec![]; }
+    fs::read_to_string(path).unwrap()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
         .collect()
 }
 
@@ -138,11 +171,11 @@ fn test_add_link_itemlinked_payload_shape() {
     let linked = events.iter().find(|e| e["event_type"] == "ItemLinked").unwrap();
     let p = &linked["payload"];
 
-    assert_eq!(p["source_id"].as_str().unwrap(),   ITEM_TASK);
-    assert_eq!(p["source_type"].as_str().unwrap(),  "task");
-    assert_eq!(p["link_type"].as_str().unwrap(),    "blocks");
-    assert_eq!(p["target_id"].as_str().unwrap(),    ITEM_MILESTONE);
-    assert_eq!(p["target_type"].as_str().unwrap(),  "milestone");
+    assert_eq!(p["source_id"].as_str().unwrap(),  ITEM_TASK);
+    assert_eq!(p["source_type"].as_str().unwrap(), "task");
+    assert_eq!(p["link_type"].as_str().unwrap(),   "blocks");
+    assert_eq!(p["target_id"].as_str().unwrap(),   ITEM_MILESTONE);
+    assert_eq!(p["target_type"].as_str().unwrap(), "milestone");
 }
 
 #[test]
@@ -165,7 +198,434 @@ fn test_add_link_then_list_shows_link() {
     ), "added link must appear in list");
 }
 
-// ── Happy Path 2: Remove a link ───────────────────────────────────────────────
+// ── Happy Path 2: Labels from vocabulary ──────────────────────────────────────
+
+#[test]
+fn test_list_labels_come_from_vocabulary_not_hardcoded() {
+    // Custom schema with non-default labels for 'blocks'
+    const CUSTOM_SCHEMA: &str = r#"schemaVersion: 1
+properties:
+  status:
+    type: enum
+statuses:
+  active:
+pageTypes:
+  Task:
+    uses: [status]
+    aliases: [task]
+  Milestone:
+    uses: [status]
+    aliases: [milestone]
+relations:
+  blocks:
+    source: []
+    target: []
+renderers:
+  logseq:
+    relations:
+      blocks:
+        forwardLabel: "Precedes"
+        inverseLabel: "Follows"
+"#;
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, CUSTOM_SCHEMA);
+    seed_full_record(&dir);
+
+    run_binary(&dir, &["add", ITEM_TASK, "blocks", ITEM_MILESTONE]);
+
+    run_binary(&dir, &["list", "--item", ITEM_TASK]);
+    let events = read_il_events(&dir);
+    let returned = events.iter().find(|e| e["event_type"] == "LinkListReturned").unwrap();
+    let links = returned["payload"]["links"].as_array().unwrap();
+
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0]["display_label"].as_str().unwrap(), "Precedes",
+        "forward label must come from vocabulary, not hardcoded 'Blocks'");
+}
+
+#[test]
+fn test_list_inverse_label_comes_from_vocabulary() {
+    const CUSTOM_SCHEMA: &str = r#"schemaVersion: 1
+properties:
+  status:
+    type: enum
+statuses:
+  active:
+pageTypes:
+  Task:
+    uses: [status]
+    aliases: [task]
+  Milestone:
+    uses: [status]
+    aliases: [milestone]
+relations:
+  blocks:
+    source: []
+    target: []
+renderers:
+  logseq:
+    relations:
+      blocks:
+        forwardLabel: "Precedes"
+        inverseLabel: "Follows"
+"#;
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, CUSTOM_SCHEMA);
+    seed_full_record(&dir);
+
+    run_binary(&dir, &["add", ITEM_TASK, "blocks", ITEM_MILESTONE]);
+    run_binary(&dir, &["list", "--item", ITEM_MILESTONE]);
+
+    let events = read_il_events(&dir);
+    let returned = events.iter().find(|e| e["event_type"] == "LinkListReturned").unwrap();
+    let links = returned["payload"]["links"].as_array().unwrap();
+
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0]["display_label"].as_str().unwrap(), "Follows",
+        "inverse label must come from vocabulary, not hardcoded 'Blocked By'");
+}
+
+// ── Happy Path 3: Unrecognized relation type excluded with LinkRelationTypeUnknown
+
+#[test]
+fn test_link_with_unrecognized_relation_emits_link_relation_type_unknown() {
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+    // Directly seed an ItemLinked event with a relation type not in the default schema
+    seed_item_linked(&dir, ITEM_TASK, "obsolete_link_type", ITEM_MILESTONE);
+
+    run_binary(&dir, &["list"]);
+
+    let events = read_il_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"LinkRelationTypeUnknown"),
+        "LinkRelationTypeUnknown must be emitted for each excluded link");
+    assert!(types.contains(&"LinkListReturned"),
+        "LinkListReturned must still be emitted");
+}
+
+#[test]
+fn test_link_relation_type_unknown_payload() {
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+    seed_item_linked(&dir, ITEM_TASK, "obsolete_link_type", ITEM_MILESTONE);
+
+    run_binary(&dir, &["list"]);
+
+    let events = read_il_events(&dir);
+    let unknown = events.iter().find(|e| e["event_type"] == "LinkRelationTypeUnknown").unwrap();
+    let p = &unknown["payload"];
+
+    assert_eq!(p["source_id"].as_str().unwrap(), ITEM_TASK);
+    assert_eq!(p["link_type"].as_str().unwrap(), "obsolete_link_type");
+    assert_eq!(p["target_id"].as_str().unwrap(), ITEM_MILESTONE);
+}
+
+#[test]
+fn test_excluded_link_absent_from_list_returned() {
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+    seed_item_linked(&dir, ITEM_TASK, "obsolete_link_type", ITEM_MILESTONE);
+
+    run_binary(&dir, &["list"]);
+
+    let events = read_il_events(&dir);
+    let returned = events.iter().find(|e| e["event_type"] == "LinkListReturned").unwrap();
+    let links = returned["payload"]["links"].as_array().unwrap();
+
+    assert!(
+        !links.iter().any(|l| l["link_type"].as_str() == Some("obsolete_link_type")),
+        "excluded link must not appear in the links array"
+    );
+}
+
+#[test]
+fn test_links_excluded_relation_unknown_count_in_payload() {
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+    seed_item_linked(&dir, ITEM_TASK,      "obsolete_link_type", ITEM_MILESTONE);
+    seed_item_linked(&dir, ITEM_MILESTONE, "another_old_type",   ITEM_RISK);
+
+    run_binary(&dir, &["list"]);
+
+    let events = read_il_events(&dir);
+    let returned = events.iter().find(|e| e["event_type"] == "LinkListReturned").unwrap();
+    let excluded = returned["payload"]["links_excluded_relation_unknown"].as_u64().unwrap();
+
+    assert_eq!(excluded, 2,
+        "links_excluded_relation_unknown must count each excluded link");
+}
+
+#[test]
+fn test_links_excluded_relation_unknown_zero_when_all_recognized() {
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+    run_binary(&dir, &["add", ITEM_TASK, "blocks", ITEM_MILESTONE]);
+    run_binary(&dir, &["list"]);
+
+    let events = read_il_events(&dir);
+    let returned = events.iter().find(|e| e["event_type"] == "LinkListReturned").unwrap();
+    let excluded = returned["payload"]["links_excluded_relation_unknown"].as_u64().unwrap();
+
+    assert_eq!(excluded, 0,
+        "links_excluded_relation_unknown must be 0 when all relation types are recognized");
+}
+
+#[test]
+fn test_excluded_link_remains_in_record_and_can_be_removed() {
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+    seed_item_linked(&dir, ITEM_TASK, "obsolete_link_type", ITEM_MILESTONE);
+
+    // Removal must succeed even though 'obsolete_link_type' is not in vocabulary
+    run_binary(&dir, &["remove", ITEM_TASK, "obsolete_link_type", ITEM_MILESTONE]);
+
+    let events = read_il_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"ItemUnlinked"),
+        "ItemUnlinked must be emitted — vocabulary evolution must not prevent removal");
+    assert!(!types.contains(&"LinkFailedLinkNotFound"),
+        "link must be found and removed");
+}
+
+// ── Failure Path 1: SchemaInvalid ─────────────────────────────────────────────
+
+#[test]
+fn test_schema_invalid_aborts_add_before_link_add_requested() {
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+
+    run_binary(&dir, &["add", ITEM_TASK, "blocks", ITEM_MILESTONE]);
+
+    let events = read_il_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(!types.contains(&"LinkAddRequested"),
+        "LinkAddRequested must NOT be emitted when schema fails to load");
+    assert!(!types.contains(&"ItemLinked"),
+        "ItemLinked must NOT be emitted when schema fails to load");
+}
+
+#[test]
+fn test_schema_invalid_aborts_list_before_link_list_requested() {
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+
+    run_binary(&dir, &["list"]);
+
+    let events = read_il_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(!types.contains(&"LinkListRequested"),
+        "LinkListRequested must NOT be emitted when schema fails to load");
+    assert!(!types.contains(&"LinkListReturned"),
+        "LinkListReturned must NOT be emitted when schema fails to load");
+}
+
+#[test]
+fn test_schema_invalid_emits_cross_module_failure_event() {
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+
+    run_binary(&dir, &["add", ITEM_TASK, "blocks", ITEM_MILESTONE]);
+
+    let all = read_all_events(&dir);
+    let schema_failures: Vec<&Value> = all.iter()
+        .filter(|e| e["source_module"].as_str() == Some("project_schema"))
+        .filter(|e| {
+            let t = e["event_type"].as_str().unwrap_or("");
+            t == "SchemaParseError" || t == "SchemaValidationFailed" || t == "SchemaNotFound"
+        })
+        .collect();
+
+    assert!(!schema_failures.is_empty(),
+        "project_schema module must emit a schema failure event when schema is invalid");
+}
+
+#[test]
+fn test_schema_invalid_project_record_unchanged() {
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+    let events_before = read_all_events(&dir).len();
+
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+    run_binary(&dir, &["add", ITEM_TASK, "blocks", ITEM_MILESTONE]);
+
+    let all_after = read_all_events(&dir);
+    let il_events: Vec<&Value> = all_after.iter()
+        .filter(|e| e["source_module"].as_str() == Some("item_links"))
+        .collect();
+
+    assert!(il_events.is_empty(),
+        "no item_links events must be appended when schema fails");
+    // Only the schema failure event was appended
+    assert_eq!(all_after.len(), events_before + 1,
+        "only one new event (schema failure) should be in the log");
+}
+
+// ── Failure Path 2: InvalidRelationType ──────────────────────────────────────
+
+#[test]
+fn test_invalid_relation_type_emits_link_failed_relation_type_unrecognized() {
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+
+    run_binary(&dir, &["add", ITEM_TASK, "owns", ITEM_MILESTONE]);
+
+    let events = read_il_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"LinkAddRequested"),
+        "LinkAddRequested must be emitted");
+    assert!(types.contains(&"LinkFailedRelationTypeUnrecognized"),
+        "LinkFailedRelationTypeUnrecognized must be emitted for unknown relation type");
+    assert!(!types.contains(&"ItemLinked"),
+        "ItemLinked must NOT be emitted");
+}
+
+#[test]
+fn test_invalid_relation_type_payload() {
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+
+    run_binary(&dir, &["add", ITEM_TASK, "owns", ITEM_MILESTONE]);
+
+    let events = read_il_events(&dir);
+    let failure = events.iter()
+        .find(|e| e["event_type"] == "LinkFailedRelationTypeUnrecognized")
+        .unwrap();
+    let p = &failure["payload"];
+
+    assert_eq!(p["failure_reason"].as_str().unwrap(), "relation_type_unrecognized");
+    assert_eq!(p["relation_type"].as_str().unwrap(), "owns",
+        "relation_type payload must identify the unrecognized relation type");
+}
+
+#[test]
+fn test_invalid_relation_type_project_record_unchanged() {
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+
+    run_binary(&dir, &["add", ITEM_TASK, "owns", ITEM_MILESTONE]);
+    run_binary(&dir, &["list"]);
+
+    let events = read_il_events(&dir);
+    let returned = events.iter().find(|e| e["event_type"] == "LinkListReturned").unwrap();
+
+    assert_eq!(returned["payload"]["link_count"].as_u64().unwrap(), 0,
+        "no link must be recorded after InvalidRelationType failure");
+}
+
+// ── Failure Path 3: ItemTypeUnrecognized ──────────────────────────────────────
+
+#[test]
+fn test_source_item_type_unrecognized_emits_failure() {
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_TASK, "AlienType", "Item with unknown type"),
+        (ITEM_MILESTONE, "milestone", "Q3 release"),
+    ]);
+
+    run_binary(&dir, &["add", ITEM_TASK, "blocks", ITEM_MILESTONE]);
+
+    let events = read_il_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"LinkFailedItemTypeUnrecognized"),
+        "LinkFailedItemTypeUnrecognized must be emitted when source entity type is unrecognized");
+    assert!(!types.contains(&"ItemLinked"),
+        "ItemLinked must NOT be emitted");
+}
+
+#[test]
+fn test_target_item_type_unrecognized_emits_failure() {
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_TASK,      "task",      "Fix critical bug"),
+        (ITEM_MILESTONE, "AlienType", "Unknown target"),
+    ]);
+
+    run_binary(&dir, &["add", ITEM_TASK, "blocks", ITEM_MILESTONE]);
+
+    let events = read_il_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"LinkFailedItemTypeUnrecognized"),
+        "LinkFailedItemTypeUnrecognized must be emitted when target entity type is unrecognized");
+    assert!(!types.contains(&"ItemLinked"),
+        "ItemLinked must NOT be emitted");
+}
+
+#[test]
+fn test_item_type_unrecognized_source_payload() {
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_TASK,      "AlienType", "Unknown source"),
+        (ITEM_MILESTONE, "milestone", "Q3 release"),
+    ]);
+
+    run_binary(&dir, &["add", ITEM_TASK, "blocks", ITEM_MILESTONE]);
+
+    let events = read_il_events(&dir);
+    let failure = events.iter()
+        .find(|e| e["event_type"] == "LinkFailedItemTypeUnrecognized")
+        .unwrap();
+    let p = &failure["payload"];
+
+    assert_eq!(p["failure_reason"].as_str().unwrap(), "item_type_unrecognized");
+    assert_eq!(p["item_id"].as_str().unwrap(),    ITEM_TASK);
+    assert_eq!(p["item_type"].as_str().unwrap(),  "AlienType");
+    assert_eq!(p["role"].as_str().unwrap(),       "source");
+}
+
+#[test]
+fn test_item_type_unrecognized_target_payload() {
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_TASK,      "task",      "Fix critical bug"),
+        (ITEM_MILESTONE, "AlienType", "Unknown target"),
+    ]);
+
+    run_binary(&dir, &["add", ITEM_TASK, "blocks", ITEM_MILESTONE]);
+
+    let events = read_il_events(&dir);
+    let failure = events.iter()
+        .find(|e| e["event_type"] == "LinkFailedItemTypeUnrecognized")
+        .unwrap();
+    let p = &failure["payload"];
+
+    assert_eq!(p["failure_reason"].as_str().unwrap(), "item_type_unrecognized");
+    assert_eq!(p["item_id"].as_str().unwrap(),    ITEM_MILESTONE);
+    assert_eq!(p["item_type"].as_str().unwrap(),  "AlienType");
+    assert_eq!(p["role"].as_str().unwrap(),       "target");
+}
+
+#[test]
+fn test_canonical_precedence_item_type_checked_before_relation_type() {
+    // When both item type and relation type are unrecognized, item type is checked first.
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_TASK,      "AlienType", "Unknown source"),
+        (ITEM_MILESTONE, "milestone", "Q3 release"),
+    ]);
+
+    run_binary(&dir, &["add", ITEM_TASK, "completely_unknown_relation", ITEM_MILESTONE]);
+
+    let events = read_il_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"LinkFailedItemTypeUnrecognized"),
+        "ItemTypeUnrecognized must be emitted (source checked before relation type)");
+    assert!(!types.contains(&"LinkFailedRelationTypeUnrecognized"),
+        "LinkFailedRelationTypeUnrecognized must NOT be reached in the same invocation");
+}
+
+// ── Remove a link ─────────────────────────────────────────────────────────────
 
 #[test]
 fn test_remove_link_emits_requested_then_unlinked() {
@@ -203,14 +663,34 @@ fn test_remove_link_no_longer_visible_in_list() {
         "link must not appear after removal");
 }
 
-// ── Happy Path 3: List all links ──────────────────────────────────────────────
+#[test]
+fn test_vocabulary_evolution_never_prevents_removal() {
+    // Even items with unrecognized entity types can have their links removed.
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_TASK,      "AlienType",   "Unknown source"),
+        (ITEM_MILESTONE, "AnotherAlien","Unknown target"),
+    ]);
+    seed_item_linked(&dir, ITEM_TASK, "obsolete_link_type", ITEM_MILESTONE);
+
+    run_binary(&dir, &["remove", ITEM_TASK, "obsolete_link_type", ITEM_MILESTONE]);
+
+    let events = read_il_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"ItemUnlinked"),
+        "ItemUnlinked must be emitted — neither unrecognized entity type nor \
+         unrecognized relation type prevents removal");
+}
+
+// ── List all links ────────────────────────────────────────────────────────────
 
 #[test]
 fn test_list_all_emits_requested_then_returned() {
     let dir = setup_temp_dir();
     seed_full_record(&dir);
-    run_binary(&dir, &["add", ITEM_TASK, "blocks",     ITEM_MILESTONE]);
-    run_binary(&dir, &["add", ITEM_RISK, "affects",    ITEM_MILESTONE]);
+    run_binary(&dir, &["add", ITEM_TASK, "blocks",  ITEM_MILESTONE]);
+    run_binary(&dir, &["add", ITEM_RISK, "affects", ITEM_MILESTONE]);
 
     run_binary(&dir, &["list"]);
 
@@ -271,7 +751,7 @@ fn test_list_requested_item_id_is_null_for_all_listing() {
         "item_id must be null when listing all");
 }
 
-// ── Happy Path 4: List links for a specific item ──────────────────────────────
+// ── List links for a specific item ────────────────────────────────────────────
 
 #[test]
 fn test_list_item_shows_outgoing_with_forward_label() {
@@ -318,7 +798,6 @@ fn test_list_item_shows_only_links_involving_that_item() {
     run_binary(&dir, &["add", ITEM_TASK, "blocks",  ITEM_MILESTONE]);
     run_binary(&dir, &["add", ITEM_RISK, "affects", ITEM_MILESTONE]);
 
-    // Query ITEM_RISK — must only show the affects link, not the blocks link
     run_binary(&dir, &["list", "--item", ITEM_RISK]);
 
     let events = read_il_events(&dir);
@@ -340,7 +819,6 @@ fn test_list_item_shows_both_outgoing_and_incoming() {
     run_binary(&dir, &["add", ITEM_TASK, "blocks",  ITEM_MILESTONE]);
     run_binary(&dir, &["add", ITEM_RISK, "affects", ITEM_MILESTONE]);
 
-    // ITEM_MILESTONE is the target of both links → 2 incoming entries
     run_binary(&dir, &["list", "--item", ITEM_MILESTONE]);
 
     let events = read_il_events(&dir);
@@ -351,13 +829,10 @@ fn test_list_item_shows_both_outgoing_and_incoming() {
     assert!(links.iter().all(|l| l["direction"].as_str() == Some("incoming")));
 }
 
-// ── Happy Path 5: List item with no links ─────────────────────────────────────
-
 #[test]
 fn test_list_item_with_no_links_returns_empty_not_failure() {
     let dir = setup_temp_dir();
     seed_full_record(&dir);
-    // No links added
 
     run_binary(&dir, &["list", "--item", ITEM_TASK]);
 
@@ -373,7 +848,7 @@ fn test_list_item_with_no_links_returns_empty_not_failure() {
     assert!(returned["payload"]["links"].as_array().unwrap().is_empty());
 }
 
-// ── Failure Path 1: ItemNotFound ──────────────────────────────────────────────
+// ── Failure: ItemNotFound ─────────────────────────────────────────────────────
 
 #[test]
 fn test_item_not_found_source_emits_failure_on_add() {
@@ -385,9 +860,9 @@ fn test_item_not_found_source_emits_failure_on_add() {
     let events = read_il_events(&dir);
     let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
 
-    assert!(types.contains(&"LinkAddRequested"),      "LinkAddRequested must be emitted");
-    assert!(types.contains(&"LinkFailedItemNotFound"),"LinkFailedItemNotFound must be emitted");
-    assert!(!types.contains(&"ItemLinked"),            "ItemLinked must NOT be emitted");
+    assert!(types.contains(&"LinkAddRequested"),       "LinkAddRequested must be emitted");
+    assert!(types.contains(&"LinkFailedItemNotFound"), "LinkFailedItemNotFound must be emitted");
+    assert!(!types.contains(&"ItemLinked"),             "ItemLinked must NOT be emitted");
 }
 
 #[test]
@@ -414,9 +889,9 @@ fn test_item_not_found_emits_failure_on_remove() {
     let events = read_il_events(&dir);
     let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
 
-    assert!(types.contains(&"LinkRemoveRequested"),   "LinkRemoveRequested must be emitted");
-    assert!(types.contains(&"LinkFailedItemNotFound"),"LinkFailedItemNotFound must be emitted");
-    assert!(!types.contains(&"ItemUnlinked"),          "ItemUnlinked must NOT be emitted");
+    assert!(types.contains(&"LinkRemoveRequested"),    "LinkRemoveRequested must be emitted");
+    assert!(types.contains(&"LinkFailedItemNotFound"), "LinkFailedItemNotFound must be emitted");
+    assert!(!types.contains(&"ItemUnlinked"),           "ItemUnlinked must NOT be emitted");
 }
 
 #[test]
@@ -431,67 +906,14 @@ fn test_item_not_found_payload_identifies_missing_id() {
     let failure = events.iter()
         .find(|e| e["event_type"] == "LinkFailedItemNotFound")
         .unwrap();
-
     let p = &failure["payload"];
+
     assert_eq!(p["failure_reason"].as_str().unwrap(), "item_not_found");
     assert_eq!(p["operation"].as_str().unwrap(), "add");
-    assert_eq!(p["missing_item_id"].as_str().unwrap(), missing,
-        "missing_item_id must identify which item was not found");
+    assert_eq!(p["missing_item_id"].as_str().unwrap(), missing);
 }
 
-// ── Failure Path 2: InvalidLinkType ──────────────────────────────────────────
-
-#[test]
-fn test_invalid_link_type_unknown_emits_failure() {
-    let dir = setup_temp_dir();
-    seed_full_record(&dir);
-
-    run_binary(&dir, &["add", ITEM_TASK, "owns", ITEM_MILESTONE]);
-
-    let events = read_il_events(&dir);
-    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
-
-    assert!(types.contains(&"LinkAddRequested"),         "LinkAddRequested must be emitted");
-    assert!(types.contains(&"LinkFailedInvalidLinkType"),"LinkFailedInvalidLinkType must be emitted");
-    assert!(!types.contains(&"ItemLinked"),               "ItemLinked must NOT be emitted");
-}
-
-#[test]
-fn test_invalid_link_type_wrong_type_pair_emits_failure() {
-    let dir = setup_temp_dir();
-    seed_full_record(&dir);
-
-    // mitigated_by requires source=risk — task is not valid
-    run_binary(&dir, &["add", ITEM_TASK, "mitigated_by", ITEM_MILESTONE]);
-
-    let events = read_il_events(&dir);
-    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
-
-    assert!(types.contains(&"LinkFailedInvalidLinkType"),
-        "LinkFailedInvalidLinkType must be emitted for a valid type used on wrong item type pair");
-    assert!(!types.contains(&"ItemLinked"), "ItemLinked must NOT be emitted");
-}
-
-#[test]
-fn test_invalid_link_type_payload_identifies_type_and_pair() {
-    let dir = setup_temp_dir();
-    seed_full_record(&dir);
-
-    run_binary(&dir, &["add", ITEM_TASK, "owns", ITEM_MILESTONE]);
-
-    let events = read_il_events(&dir);
-    let failure = events.iter()
-        .find(|e| e["event_type"] == "LinkFailedInvalidLinkType")
-        .unwrap();
-
-    let p = &failure["payload"];
-    assert_eq!(p["failure_reason"].as_str().unwrap(), "invalid_link_type");
-    assert_eq!(p["link_type"].as_str().unwrap(),      "owns");
-    assert_eq!(p["source_type"].as_str().unwrap(),    "task");
-    assert_eq!(p["target_type"].as_str().unwrap(),    "milestone");
-}
-
-// ── Failure Path 3: DuplicateLink ────────────────────────────────────────────
+// ── Failure: DuplicateLink ────────────────────────────────────────────────────
 
 #[test]
 fn test_duplicate_link_emits_failure() {
@@ -523,28 +945,27 @@ fn test_duplicate_link_payload() {
     let failure = events.iter()
         .find(|e| e["event_type"] == "LinkFailedDuplicateLink")
         .unwrap();
-
     let p = &failure["payload"];
+
     assert_eq!(p["failure_reason"].as_str().unwrap(), "duplicate_link");
     assert_eq!(p["source_id"].as_str().unwrap(), ITEM_TASK);
     assert_eq!(p["link_type"].as_str().unwrap(), "blocks");
     assert_eq!(p["target_id"].as_str().unwrap(), ITEM_MILESTONE);
 }
 
-// ── Failure Path 4: LinkNotFound ──────────────────────────────────────────────
+// ── Failure: LinkNotFound ─────────────────────────────────────────────────────
 
 #[test]
 fn test_link_not_found_emits_failure_on_remove() {
     let dir = setup_temp_dir();
     seed_full_record(&dir);
-    // No link added
 
     run_binary(&dir, &["remove", ITEM_TASK, "blocks", ITEM_MILESTONE]);
 
     let events = read_il_events(&dir);
     let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
 
-    assert!(types.contains(&"LinkRemoveRequested"),  "LinkRemoveRequested must be emitted");
+    assert!(types.contains(&"LinkRemoveRequested"),   "LinkRemoveRequested must be emitted");
     assert!(types.contains(&"LinkFailedLinkNotFound"),"LinkFailedLinkNotFound must be emitted");
     assert!(!types.contains(&"ItemUnlinked"),          "ItemUnlinked must NOT be emitted");
 }
@@ -560,8 +981,8 @@ fn test_link_not_found_payload() {
     let failure = events.iter()
         .find(|e| e["event_type"] == "LinkFailedLinkNotFound")
         .unwrap();
-
     let p = &failure["payload"];
+
     assert_eq!(p["failure_reason"].as_str().unwrap(), "link_not_found");
     assert_eq!(p["source_id"].as_str().unwrap(), ITEM_TASK);
     assert_eq!(p["link_type"].as_str().unwrap(), "blocks");
@@ -597,9 +1018,9 @@ fn test_directionality_preserved_related_to() {
     let dir = setup_temp_dir();
     seed_full_record(&dir);
 
-    // related_to is valid in both directions for any types
-    run_binary(&dir, &["add", ITEM_TASK,      "related_to", ITEM_MILESTONE]);
-    run_binary(&dir, &["add", ITEM_MILESTONE, "related_to", ITEM_TASK]);
+    // relatedTo is the schema-defined name (camelCase)
+    run_binary(&dir, &["add", ITEM_TASK,      "relatedTo", ITEM_MILESTONE]);
+    run_binary(&dir, &["add", ITEM_MILESTONE, "relatedTo", ITEM_TASK]);
 
     run_binary(&dir, &["list"]);
 
@@ -607,18 +1028,16 @@ fn test_directionality_preserved_related_to() {
     let returned = events.iter().find(|e| e["event_type"] == "LinkListReturned").unwrap();
 
     assert_eq!(returned["payload"]["link_count"].as_u64().unwrap(), 2,
-        "A→B and B→A related_to links are distinct and both must appear");
+        "A→B and B→A relatedTo links are distinct and both must appear");
 }
 
 #[test]
 fn test_related_to_shows_same_label_on_both_sides() {
     let dir = setup_temp_dir();
     seed_full_record(&dir);
-    run_binary(&dir, &["add", ITEM_TASK, "related_to", ITEM_MILESTONE]);
+    run_binary(&dir, &["add", ITEM_TASK, "relatedTo", ITEM_MILESTONE]);
 
-    // Query source
     run_binary(&dir, &["list", "--item", ITEM_TASK]);
-    // Query target
     run_binary(&dir, &["list", "--item", ITEM_MILESTONE]);
 
     let events = read_il_events(&dir);
@@ -631,7 +1050,7 @@ fn test_related_to_shows_same_label_on_both_sides() {
         let links = ret["payload"]["links"].as_array().unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(links[0]["display_label"].as_str().unwrap(), "Related To",
-            "related_to must show 'Related To' label on both source and target side");
+            "relatedTo must show 'Related To' label on both source and target side");
     }
 }
 
@@ -680,7 +1099,7 @@ fn test_separate_invocations_have_different_correlation_ids() {
     let dir = setup_temp_dir();
     seed_full_record(&dir);
 
-    run_binary(&dir, &["add", ITEM_TASK,      "blocks",  ITEM_MILESTONE]);
+    run_binary(&dir, &["add", ITEM_TASK, "blocks",  ITEM_MILESTONE]);
     run_binary(&dir, &["add", ITEM_RISK, "affects", ITEM_MILESTONE]);
 
     let events = read_il_events(&dir);

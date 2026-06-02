@@ -17,45 +17,93 @@ properties:
     type: date
 
 statuses:
-  active:
-  waiting:
+  # task statuses
+  todo:
+  doing:
   done:
+  waiting:
   cancelled:
+  # milestone statuses
+  pending:
+  achieved:
+  missed:
+  # risk statuses
+  open:
+  mitigated:
+  accepted:
+  closed:
+  # issue statuses
+  in_progress:
+  resolved:
+  # stakeholder statuses
+  active:
+  inactive:
 
 pageTypes:
   Stakeholder:
     uses:
       - status
+    allowedStatuses:
+      - active
+      - inactive
+    aliases:
+      - stakeholder
   Milestone:
     uses:
       - status
       - deadline
+    allowedStatuses:
+      - pending
+      - achieved
+      - missed
+    aliases:
+      - milestone
   WorkPackage:
     uses:
       - status
       - priority
       - deadline
+    aliases:
+      - workpackage
+  # Task as a top-level page type for backward compatibility with existing event logs.
+  # Pre-F12, pm_structuring extracts "task" items as top-level project record entries.
+  # F12 (task_model) will redefine Task as an embedded block type.
+  Task:
+    uses:
+      - status
+    allowedStatuses:
+      - todo
+      - doing
+      - done
+      - waiting
+      - cancelled
+    aliases:
+      - task
   Issue:
     uses:
       - status
       - deadline
+    allowedStatuses:
+      - open
+      - in_progress
+      - resolved
+      - closed
+    aliases:
+      - issue
   Risk:
     uses:
       - status
       - deadline
+    allowedStatuses:
+      - open
+      - mitigated
+      - accepted
+      - closed
+    aliases:
+      - risk
 
-blockTypes:
-  Task:
-    markers:
-      TODO: active
-      DOING: active
-      NOW: active
-      WAITING: waiting
-      LATER: waiting
-      DONE: done
-    uses:
-      - scheduled
-      - deadline
+# blockTypes (Task as embedded block) deferred to F12 (task_model).
+# No task instances are persisted in the event log until F12.
 
 relations:
   assignedTo:

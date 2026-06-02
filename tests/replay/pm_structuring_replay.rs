@@ -32,7 +32,8 @@ const VALID_EVENT_TYPES: &[&str] = &[
     "ExtractionFailedFolderNotFound",
 ];
 
-const VALID_ITEM_TYPES: &[&str] = &["task", "milestone", "risk", "issue", "stakeholder"];
+// R6: "unknown" is a valid item_type when the LLM produces a type not recognized by the vocabulary
+const VALID_ITEM_TYPES: &[&str] = &["task", "milestone", "risk", "issue", "stakeholder", "unknown"];
 
 const VALID_STATUSES_BY_TYPE: &[(&str, &[&str])] = &[
     ("task",        &["todo", "doing", "done", "waiting", "cancelled"]),
@@ -177,6 +178,14 @@ fn test_happy_path_fixture_items_extracted_payload() {
                 assert!(!item["uncertainty_reason"].is_null(),
                     "uncertainty_reason must not be null when uncertain is true");
             }
+
+            // R6: items with item_type="unknown" must have uncertain=true and proposed_status=null
+            if item_type == "unknown" {
+                assert!(item["uncertain"].as_bool().unwrap_or(false),
+                    "item_type='unknown' must have uncertain=true (HP2)");
+                assert!(item["proposed_status"].is_null(),
+                    "item_type='unknown' must have proposed_status=null (HP4)");
+            }
         }
     }
 }
@@ -218,8 +227,14 @@ fn test_happy_path_fixture_proposed_status_values_are_valid() {
     if let Some(extracted) = events.iter().find(|e| e["event_type"] == "ItemsExtracted") {
         let items = extracted["payload"]["items"].as_array().unwrap();
         for item in items {
+            let item_type = item["item_type"].as_str().unwrap();
+            // R6: "unknown" items always have null proposed_status (HP4) — skip status validation
+            if item_type == "unknown" {
+                assert!(item["proposed_status"].is_null(),
+                    "item_type='unknown' must have proposed_status=null (HP4)");
+                continue;
+            }
             if let Some(status) = item["proposed_status"].as_str() {
-                let item_type = item["item_type"].as_str().unwrap();
                 let valid = valid_statuses_for(item_type);
                 assert!(valid.contains(&status),
                     "proposed_status '{}' is not valid for item_type '{}'", status, item_type);
@@ -443,4 +458,223 @@ fn test_folder_not_found_fixture_scan_events_share_correlation_id() {
         fail["correlation_id"].as_str().unwrap(),
         "FolderScanRequested and ExtractionFailedFolderNotFound must share correlation_id"
     );
+}
+
+// ── R6: HP5 fixture — proposed status null for out-of-vocabulary value ────────
+// Fixture captures an ItemsExtracted where the LLM proposed a status outside
+// the vocabulary status set for a recognized type. The stored proposed_status
+// is null; the item is not marked uncertain (HP5: silently set to null).
+
+fn hp5_events() -> Vec<Value> {
+    load_fixture("pm_structuring_hp5_status_nulled.jsonl")
+}
+
+#[test]
+fn test_hp5_fixture_recognized_type_has_null_proposed_status() {
+    let events = hp5_events();
+    let extracted = events.iter().find(|e| e["event_type"] == "ItemsExtracted")
+        .expect("HP5 fixture must contain an ItemsExtracted event");
+    let items = extracted["payload"]["items"].as_array().unwrap();
+
+    let action_item = items.iter()
+        .find(|i| i["item_type"].as_str() == Some("action"))
+        .expect("HP5 fixture must contain an item with item_type='action'");
+
+    assert!(action_item["proposed_status"].is_null(),
+        "HP5: proposed_status must be null when LLM's proposed value is outside the vocabulary status set");
+}
+
+#[test]
+fn test_hp5_fixture_item_not_uncertain_due_to_null_proposed_status() {
+    let events = hp5_events();
+    let extracted = events.iter().find(|e| e["event_type"] == "ItemsExtracted").unwrap();
+    let items = extracted["payload"]["items"].as_array().unwrap();
+
+    let action_item = items.iter()
+        .find(|i| i["item_type"].as_str() == Some("action")).unwrap();
+
+    assert!(!action_item["uncertain"].as_bool().unwrap_or(true),
+        "HP5: out-of-vocabulary proposed_status must not mark the item as uncertain");
+}
+
+#[test]
+fn test_hp5_fixture_valid_proposed_status_is_recorded() {
+    let events = hp5_events();
+    let extracted = events.iter().find(|e| e["event_type"] == "ItemsExtracted").unwrap();
+    let items = extracted["payload"]["items"].as_array().unwrap();
+
+    let problem_item = items.iter()
+        .find(|i| i["item_type"].as_str() == Some("problem"))
+        .expect("HP5 fixture must contain an item with item_type='problem'");
+
+    assert_eq!(problem_item["proposed_status"].as_str().unwrap(), "open",
+        "HP3: a valid proposed_status within the vocabulary status set must be recorded as-is");
+}
+
+#[test]
+fn test_hp5_fixture_event_types_are_schema_members() {
+    let events = hp5_events();
+    for event in &events {
+        let t = event["event_type"].as_str().unwrap();
+        assert!(VALID_EVENT_TYPES.contains(&t),
+            "Event type '{}' in hp5 fixture is not in the approved schema", t);
+    }
+}
+
+// ── R6: SchemaInvalid fixture (FP1) ───────────────────────────────────────────
+// When the schema is invalid, pm_structuring emits no events. The fixture
+// captures only the cross-module project_schema failure event.
+
+fn schema_invalid_events() -> Vec<Value> {
+    load_fixture("pm_structuring_schema_invalid.jsonl")
+}
+
+#[test]
+fn test_schema_invalid_fixture_has_no_pm_structuring_events() {
+    let events = schema_invalid_events();
+    assert!(!events.is_empty(), "Fixture must contain at least one event");
+
+    let pms_events: Vec<&Value> = events.iter()
+        .filter(|e| e["source_module"].as_str() == Some("pm_structuring"))
+        .collect();
+
+    assert!(pms_events.is_empty(),
+        "Schema-invalid fixture must contain no pm_structuring events — TextSubmitted must not appear");
+}
+
+#[test]
+fn test_schema_invalid_fixture_contains_project_schema_failure_event() {
+    let events = schema_invalid_events();
+    let failure = events.iter().find(|e| {
+        e["source_module"].as_str() == Some("project_schema")
+            && matches!(e["event_type"].as_str(),
+                Some("SchemaParseError") | Some("SchemaValidationFailed"))
+    });
+    assert!(failure.is_some(),
+        "Schema-invalid fixture must contain a SchemaParseError or SchemaValidationFailed event from project_schema");
+}
+
+#[test]
+fn test_schema_invalid_fixture_failure_event_has_required_fields() {
+    let events = schema_invalid_events();
+    let failure = events.iter()
+        .find(|e| e["source_module"].as_str() == Some("project_schema")
+            && matches!(e["event_type"].as_str(),
+                Some("SchemaParseError") | Some("SchemaValidationFailed")))
+        .expect("project_schema failure event must be present");
+
+    assert!(failure["event_id"].as_str().is_some(),       "event_id must be a string");
+    assert!(failure["event_type"].as_str().is_some(),     "event_type must be a string");
+    assert!(failure["timestamp"].as_u64().is_some(),      "timestamp must be a u64");
+    assert!(failure["correlation_id"].as_str().is_some(), "correlation_id must be a string");
+    assert!(failure["source_module"].as_str().is_some(),  "source_module must be a string");
+    assert!(failure["payload"].is_object(),               "payload must be an object");
+}
+
+#[test]
+fn test_schema_invalid_fixture_no_extraction_events() {
+    let events = schema_invalid_events();
+    let extraction_types = ["TextSubmitted", "ItemsExtracted", "ExtractionConfirmed",
+                            "ExtractionRejected", "FolderScanRequested", "FolderScanCompleted"];
+    for event in &events {
+        let t = event["event_type"].as_str().unwrap();
+        assert!(!extraction_types.contains(&t),
+            "Schema-invalid fixture must not contain extraction event '{}' — abort is before any command event", t);
+    }
+}
+
+// ── R6: Unknown type fixture (HP2, HP4) ──────────────────────────────────────
+// Fixture captures an ItemsExtracted event where the LLM predicted a type not
+// recognized by the active vocabulary. The stored item_type is "unknown".
+
+fn unknown_type_events() -> Vec<Value> {
+    load_fixture("pm_structuring_unknown_type.jsonl")
+}
+
+#[test]
+fn test_unknown_type_fixture_contains_items_extracted() {
+    let events = unknown_type_events();
+    let extracted = events.iter().find(|e| e["event_type"] == "ItemsExtracted");
+    assert!(extracted.is_some(), "unknown_type fixture must contain an ItemsExtracted event");
+}
+
+#[test]
+fn test_unknown_type_fixture_item_type_unknown_is_accepted_by_schema() {
+    let events = unknown_type_events();
+    let extracted = events.iter().find(|e| e["event_type"] == "ItemsExtracted").unwrap();
+    let items = extracted["payload"]["items"].as_array().unwrap();
+
+    let unknown_items: Vec<&Value> = items.iter()
+        .filter(|i| i["item_type"].as_str() == Some("unknown"))
+        .collect();
+    assert!(!unknown_items.is_empty(),
+        "unknown_type fixture must contain at least one item with item_type='unknown'");
+
+    for item in &unknown_items {
+        let item_type = item["item_type"].as_str().unwrap();
+        assert!(VALID_ITEM_TYPES.contains(&item_type),
+            "item_type='unknown' must be accepted by VALID_ITEM_TYPES — it is now schema-valid (R6)");
+    }
+}
+
+#[test]
+fn test_unknown_type_fixture_unknown_items_are_uncertain() {
+    let events = unknown_type_events();
+    let extracted = events.iter().find(|e| e["event_type"] == "ItemsExtracted").unwrap();
+    let items = extracted["payload"]["items"].as_array().unwrap();
+
+    for item in items {
+        if item["item_type"].as_str() == Some("unknown") {
+            assert_eq!(item["uncertain"].as_bool().unwrap_or(false), true,
+                "item_type='unknown' must have uncertain=true (HP2)");
+            assert!(item["proposed_status"].is_null(),
+                "item_type='unknown' must have proposed_status=null (HP4)");
+            assert!(!item["uncertainty_reason"].is_null(),
+                "item_type='unknown' must have a non-null uncertainty_reason (HP2)");
+        }
+    }
+}
+
+#[test]
+fn test_unknown_type_fixture_uncertainty_reason_identifies_predicted_type() {
+    let events = unknown_type_events();
+    let extracted = events.iter().find(|e| e["event_type"] == "ItemsExtracted").unwrap();
+    let items = extracted["payload"]["items"].as_array().unwrap();
+
+    for item in items {
+        if item["item_type"].as_str() == Some("unknown") {
+            let reason = item["uncertainty_reason"].as_str()
+                .expect("uncertainty_reason must be a string for unknown items");
+            assert!(reason.contains("not recognized"),
+                "uncertainty_reason must state the type is not recognized by the vocabulary, got: '{}'", reason);
+        }
+    }
+}
+
+#[test]
+fn test_unknown_type_fixture_event_types_are_schema_members() {
+    let events = unknown_type_events();
+    for event in &events {
+        let t = event["event_type"].as_str().unwrap();
+        assert!(VALID_EVENT_TYPES.contains(&t),
+            "Event type '{}' in unknown_type fixture is not in the approved schema", t);
+    }
+}
+
+#[test]
+fn test_unknown_type_fixture_all_events_have_required_base_fields() {
+    let events = unknown_type_events();
+    assert!(!events.is_empty(), "Fixture must not be empty");
+
+    for event in &events {
+        let t = event["event_type"].as_str().unwrap_or("unknown_event");
+        assert!(event["event_id"].as_str().is_some(),       "{}: event_id must be a string", t);
+        assert!(event["event_type"].as_str().is_some(),     "{}: event_type must be a string", t);
+        assert!(event["timestamp"].as_u64().is_some(),      "{}: timestamp must be a u64", t);
+        assert!(event["correlation_id"].as_str().is_some(), "{}: correlation_id must be a string", t);
+        assert!(event["source_module"].as_str().is_some(),  "{}: source_module must be a string", t);
+        assert!(event["payload"].is_object(),               "{}: payload must be an object", t);
+        assert_eq!(event["source_module"].as_str().unwrap(), "pm_structuring",
+            "{}: source_module must be 'pm_structuring'", t);
+    }
 }

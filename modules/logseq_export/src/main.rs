@@ -1,5 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use project_schema::{
+    emit_type_unknown, load_and_validate, logseq_forward_label, logseq_inverse_label,
+    resolve_type, ProjectSchema,
+};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
@@ -171,6 +175,14 @@ fn current_priority(item_id: &str) -> Result<Option<String>> {
     Ok(last)
 }
 
+/// Return the recorded deadline for an item, or None if not set.
+/// Returns None → rendered as "TBD" on Logseq pages.
+/// Future: reads DeadlineUpdated events when pm_structuring and logseq_sync
+/// schema integrations are complete.
+fn current_deadline(_item_id: &str) -> Result<Option<String>> {
+    Ok(None)
+}
+
 fn proposed_status_and_priority(item_id: &str) -> Result<(Option<String>, Option<String>)> {
     if !Path::new(EVENTS_FILE).exists() { return Ok((None, None)); }
     let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
@@ -257,28 +269,17 @@ fn build_active_links() -> Result<Vec<LinkRecord>> {
     Ok(links)
 }
 
-fn forward_label(link_type: &str) -> &'static str {
-    match link_type {
-        "blocks"       => "Blocks",
-        "affects"      => "Affects",
-        "assigned_to"  => "Assigned To",
-        "mitigated_by" => "Mitigated By",
-        "escalates_to" => "Escalated To",
-        "related_to"   => "Related To",
-        _              => "Linked To",
+/// Convert a PascalCase or lowercase type name to a Logseq-friendly kebab-case tag.
+/// e.g. "WorkPackage" → "work-package", "task" → "task", "Milestone" → "milestone"
+fn type_to_logseq_tag(type_name: &str) -> String {
+    let mut result = String::new();
+    for (i, ch) in type_name.chars().enumerate() {
+        if ch.is_uppercase() && i > 0 {
+            result.push('-');
+        }
+        result.extend(ch.to_lowercase());
     }
-}
-
-fn inverse_label(link_type: &str) -> &'static str {
-    match link_type {
-        "blocks"       => "Blocked By",
-        "affects"      => "Affected By",
-        "assigned_to"  => "Owns",
-        "mitigated_by" => "Mitigates",
-        "escalates_to" => "Escalations",
-        "related_to"   => "Related To",
-        _              => "Linked From",
-    }
+    result
 }
 
 /// Convert a description string to a URL-safe slug (max 120 chars, word boundary truncation).
@@ -325,18 +326,19 @@ fn render_relationship_sections(
     item_id: &str,
     links: &[LinkRecord],
     slug_map: &HashMap<String, String>,
+    schema: &ProjectSchema,
 ) -> String {
     let mut sections: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for link in links {
         if link.source_id == item_id {
-            let label = forward_label(&link.link_type).to_string();
+            let label = logseq_forward_label(schema, &link.link_type).to_string();
             let target_ref = slug_map
                 .get(&link.target_id)
                 .cloned()
                 .unwrap_or_else(|| link.target_id.clone());
             sections.entry(label).or_default().push(format!("[[{}]]", target_ref));
         } else if link.target_id == item_id {
-            let label = inverse_label(&link.link_type).to_string();
+            let label = logseq_inverse_label(schema, &link.link_type).to_string();
             let source_ref = slug_map
                 .get(&link.source_id)
                 .cloned()
@@ -357,20 +359,26 @@ fn render_relationship_sections(
 
 fn render_page(
     item: &RecordedItem,
+    canonical_type: &str,
     status: Option<&str>,
     priority: Option<&str>,
+    deadline: Option<&str>,
     links: &[LinkRecord],
     slug_map: &HashMap<String, String>,
+    schema: &ProjectSchema,
 ) -> String {
+    let type_tag = type_to_logseq_tag(canonical_type);
     let status_val = status.unwrap_or("not-set");
     let priority_val = priority.unwrap_or("not-set");
-    let rel_sections = render_relationship_sections(&item.item_id, links, slug_map);
+    let deadline_val = deadline.unwrap_or("TBD");
+    let rel_sections = render_relationship_sections(&item.item_id, links, slug_map, schema);
     format!(
-        "type:: {}\nstatus:: {}\npriority:: {}\ntags:: {}\n\n- item-id: {}\n{}",
-        item.item_type,
+        "type:: {}\nstatus:: {}\npriority:: {}\ndeadline:: {}\ntags:: {}\n\n- item-id: {}\n{}",
+        type_tag,
         status_val,
         priority_val,
-        item.item_type,
+        deadline_val,
+        type_tag,
         item.item_id,
         rel_sections,
     )
@@ -405,6 +413,14 @@ fn remove_stale_pages(pages_dir: &Path, current_slugs: &[String]) {
 
 fn cmd_export(output_dir: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+    let events_path = Path::new(EVENTS_FILE);
+
+    // Load and validate the project vocabulary schema.
+    // On failure, project_schema emits the appropriate FAILURE event and returns None.
+    let schema = match load_and_validate(Path::new("."), events_path, &correlation_id) {
+        Some(s) => s,
+        None => return Ok(()),
+    };
 
     emit_event("ExportRequested", &correlation_id, json!({
         "output_dir": output_dir,
@@ -452,15 +468,46 @@ fn cmd_export(output_dir: &str) -> Result<()> {
         return Ok(());
     }
 
+    // Filter items: skip those with unrecognized entity types.
+    // emit_type_unknown is called per excluded item (SchemaTypeUnknown from project_schema module).
+    let mut items_excluded: u32 = 0;
+    let recognized_items: Vec<(&RecordedItem, &str)> = items
+        .iter()
+        .filter_map(|item| {
+            match resolve_type(&schema, &item.item_type) {
+                Some(canonical) => Some((item, canonical)),
+                None => {
+                    emit_type_unknown(events_path, &item.item_id, &item.item_type, &correlation_id);
+                    eprintln!(
+                        "warning: item {} has unrecognized type '{}' — excluded from export",
+                        item.item_id, item.item_type
+                    );
+                    items_excluded += 1;
+                    None
+                }
+            }
+        })
+        .collect();
+
     let slug_map = build_slug_map(&items);
     let links = build_active_links()?;
     let mut pages_written: Vec<String> = Vec::new();
 
-    for item in &items {
+    for (item, canonical_type) in &recognized_items {
         let slug = slug_map.get(&item.item_id).cloned().unwrap_or_else(|| item.item_id.clone());
         let status = effective_status(&item.item_id)?;
         let priority = effective_priority(&item.item_id)?;
-        let content = render_page(item, status.as_deref(), priority.as_deref(), &links, &slug_map);
+        let deadline = current_deadline(&item.item_id)?;
+        let content = render_page(
+            item,
+            canonical_type,
+            status.as_deref(),
+            priority.as_deref(),
+            deadline.as_deref(),
+            &links,
+            &slug_map,
+            &schema,
+        );
         let page_path = pages_dir.join(format!("{}.md", slug));
         fs::write(&page_path, &content)
             .with_context(|| format!("writing page {}", page_path.display()))?;
@@ -468,16 +515,25 @@ fn cmd_export(output_dir: &str) -> Result<()> {
     }
 
     // Remove pages that are no longer in the current export set
-    let current_slugs: Vec<String> = slug_map.values().cloned().collect();
+    let current_slugs: Vec<String> = recognized_items
+        .iter()
+        .filter_map(|(item, _)| slug_map.get(&item.item_id).cloned())
+        .collect();
     remove_stale_pages(&pages_dir, &current_slugs);
 
-    let item_count = items.len() as u64;
-    println!("Exported {} item(s) to '{}'.", item_count, output_dir);
+    let item_count = recognized_items.len() as u64;
+    println!(
+        "Exported {} item(s) to '{}'.{}",
+        item_count,
+        output_dir,
+        if items_excluded > 0 { format!(" ({} excluded: unrecognized type)", items_excluded) } else { String::new() }
+    );
 
     emit_event("ExportCompleted", &correlation_id, json!({
         "output_dir": output_dir,
         "item_count": item_count,
         "pages_written": pages_written,
+        "items_excluded_type_unknown": items_excluded,
     }));
 
     Ok(())

@@ -14,10 +14,64 @@ fn binary_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_item_status"))
 }
 
+// Minimal default vocabulary matching the installed ~/.lucidpm/default-schema.yaml.
+// Makes tests portable without requiring the installed schema to be present.
+const DEFAULT_SCHEMA: &str = r#"schemaVersion: 1
+statuses:
+  todo:
+  doing:
+  done:
+  waiting:
+  cancelled:
+  pending:
+  achieved:
+  missed:
+  open:
+  mitigated:
+  accepted:
+  closed:
+  in_progress:
+  resolved:
+  active:
+  inactive:
+pageTypes:
+  Task:
+    allowedStatuses: [todo, doing, done, waiting, cancelled]
+    aliases: [task]
+  Milestone:
+    allowedStatuses: [pending, achieved, missed]
+    aliases: [milestone]
+  Risk:
+    allowedStatuses: [open, mitigated, accepted, closed]
+    aliases: [risk]
+  Issue:
+    allowedStatuses: [open, in_progress, resolved, closed]
+    aliases: [issue]
+  Stakeholder:
+    allowedStatuses: [active, inactive]
+    aliases: [stakeholder]
+"#;
+
+fn write_project_schema(dir: &TempDir, yaml: &str) {
+    fs::write(dir.path().join("project-schema.yaml"), yaml).unwrap();
+}
+
 fn setup_temp_dir() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir(dir.path().join("events")).unwrap();
+    write_project_schema(&dir, DEFAULT_SCHEMA);
     dir
+}
+
+/// Read all events (all source_modules) from the events file.
+fn read_all_events(dir: &TempDir) -> Vec<Value> {
+    let path = dir.path().join("events/runtime_events.jsonl");
+    if !path.exists() { return vec![]; }
+    fs::read_to_string(path).unwrap()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .collect()
 }
 
 /// Seed pm_structuring + project_state events so item_status can find items.
@@ -745,4 +799,664 @@ fn test_separate_invocations_have_different_correlation_ids() {
     assert_eq!(ids.len(), 2);
     assert_ne!(ids[0], ids[1],
         "Different invocations must produce different correlation_ids");
+}
+
+// ── R5: Schema-driven vocabulary (HP1) ───────────────────────────────────────
+
+#[test]
+fn test_schema_vocabulary_governs_set_status_custom_type() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  draft:
+  active:
+  delivered:
+  todo:
+  doing:
+  done:
+  waiting:
+  cancelled:
+  pending:
+  achieved:
+  missed:
+  open:
+  mitigated:
+  accepted:
+  closed:
+  in_progress:
+  resolved:
+  inactive:
+pageTypes:
+  Epic:
+    allowedStatuses: [draft, active, delivered]
+    aliases: [epic]
+"#);
+    seed_incorporated_items(&dir, SESSION_A, &[("epic-0001-0000-0000-000000000001", "epic", "Q3 roadmap")]);
+
+    run_binary(&dir, &["set-status", "epic-0001-0000-0000-000000000001", "active"]);
+
+    let events = read_is_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"ItemStatusUpdated"),
+        "set-status with a vocabulary-defined status for a custom type must succeed");
+    assert!(!types.contains(&"StatusUpdateFailedInvalidStatus"),
+        "must NOT emit InvalidStatus failure for a valid vocabulary status");
+}
+
+#[test]
+fn test_custom_type_with_no_status_vocabulary_rejects_all_statuses() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  todo:
+  doing:
+  done:
+  waiting:
+  cancelled:
+  pending:
+  achieved:
+  missed:
+  open:
+  mitigated:
+  accepted:
+  closed:
+  in_progress:
+  resolved:
+  active:
+  inactive:
+pageTypes:
+  Note:
+    aliases: [note]
+"#);
+    // Note has no allowedStatuses — empty status vocabulary is the condition under test.
+    seed_incorporated_items(&dir, SESSION_A, &[("note-0001-0000-0000-000000000001", "note", "Architecture notes")]);
+
+    run_binary(&dir, &["set-status", "note-0001-0000-0000-000000000001", "open"]);
+
+    let events = read_is_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"StatusUpdateFailedInvalidStatus"),
+        "type with empty allowedStatuses must reject all status values");
+    assert!(!types.contains(&"ItemStatusUpdated"),
+        "ItemStatusUpdated must NOT be emitted for a type with no status vocabulary");
+}
+
+#[test]
+fn test_schema_vocabulary_invalid_status_uses_vocabulary_not_hardcoded_table() {
+    // "doing" is valid for task per legacy table but we override the schema
+    // to exclude it — validation must use the schema, not the hardcoded table.
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  open:
+  closed:
+  todo:
+  doing:
+  done:
+  waiting:
+  cancelled:
+  pending:
+  achieved:
+  missed:
+  mitigated:
+  accepted:
+  in_progress:
+  resolved:
+  active:
+  inactive:
+pageTypes:
+  Task:
+    allowedStatuses: [open, closed]
+    aliases: [task]
+"#);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+
+    run_binary(&dir, &["set-status", ITEM_TASK, "doing"]);
+
+    let events = read_is_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"StatusUpdateFailedInvalidStatus"),
+        "'doing' must be rejected when the active vocabulary does not include it");
+    assert!(!types.contains(&"ItemStatusUpdated"),
+        "ItemStatusUpdated must NOT be emitted");
+}
+
+// ── R5: Schema failure (FP1) ─────────────────────────────────────────────────
+
+#[test]
+fn test_schema_invalid_aborts_set_status_before_observational_event() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+
+    run_binary(&dir, &["set-status", ITEM_TASK, "doing"]);
+
+    let events = read_is_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(!types.contains(&"StatusUpdateRequested"),
+        "StatusUpdateRequested must NOT be emitted when schema is invalid");
+    assert!(!types.contains(&"ItemStatusUpdated"),
+        "ItemStatusUpdated must NOT be emitted when schema is invalid");
+}
+
+#[test]
+fn test_schema_invalid_aborts_set_priority_before_observational_event() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+
+    run_binary(&dir, &["set-priority", ITEM_TASK, "high"]);
+
+    let events = read_is_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(!types.contains(&"PriorityUpdateRequested"),
+        "PriorityUpdateRequested must NOT be emitted when schema is invalid");
+    assert!(!types.contains(&"ItemPriorityUpdated"),
+        "ItemPriorityUpdated must NOT be emitted when schema is invalid");
+}
+
+#[test]
+fn test_schema_invalid_aborts_get_before_observational_event() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+
+    run_binary(&dir, &["get", ITEM_TASK]);
+
+    let events = read_is_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(!types.contains(&"ItemStatusQueried"),
+        "ItemStatusQueried must NOT be emitted when schema is invalid");
+    assert!(!types.contains(&"ItemStatusReturned"),
+        "ItemStatusReturned must NOT be emitted when schema is invalid");
+}
+
+#[test]
+fn test_schema_invalid_emits_cross_module_failure_event() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+
+    run_binary(&dir, &["set-status", ITEM_TASK, "doing"]);
+
+    let all = read_all_events(&dir);
+    let schema_failures: Vec<&Value> = all.iter()
+        .filter(|e| e["source_module"].as_str() == Some("project_schema"))
+        .filter(|e| {
+            let t = e["event_type"].as_str().unwrap_or("");
+            t == "SchemaParseError" || t == "SchemaValidationFailed" || t == "SchemaNotFound"
+        })
+        .collect();
+
+    assert!(!schema_failures.is_empty(),
+        "project_schema module must emit a schema failure event when schema is invalid");
+}
+
+#[test]
+fn test_schema_invalid_project_record_unchanged() {
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+    run_binary(&dir, &["set-status", ITEM_TASK, "todo"]); // valid — record first status
+
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+    run_binary(&dir, &["set-status", ITEM_TASK, "doing"]); // fails — schema invalid
+
+    let events = read_is_events(&dir);
+    let updated: Vec<&Value> = events.iter()
+        .filter(|e| e["event_type"] == "ItemStatusUpdated")
+        .collect();
+
+    assert_eq!(updated.len(), 1, "Only the first set-status (valid schema) must produce ItemStatusUpdated");
+    assert_eq!(updated[0]["payload"]["new_status"].as_str().unwrap(), "todo",
+        "Project record must be unchanged after schema failure");
+}
+
+// ── R5: Marker-derived effective status (HP2) ─────────────────────────────────
+
+const MARKER_SCHEMA: &str = r#"schemaVersion: 1
+statuses:
+  todo:
+  doing:
+  done:
+  waiting:
+  cancelled:
+  pending:
+  achieved:
+  missed:
+  open:
+  mitigated:
+  accepted:
+  closed:
+  in_progress:
+  resolved:
+  active:
+  inactive:
+pageTypes:
+  Task:
+    allowedStatuses: [todo, doing, done, waiting, cancelled]
+    aliases: [task]
+blockTypes:
+  taskBlock:
+    markers:
+      TODO: todo
+      DOING: doing
+      DONE: done
+"#;
+
+#[test]
+fn test_marker_derived_effective_status_at_query_time() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, MARKER_SCHEMA);
+    // Description starts with "TODO" — the vocabulary maps TODO → todo
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "TODO Deploy by Friday")]);
+
+    run_binary(&dir, &["get", ITEM_TASK]);
+
+    let events = read_is_events(&dir);
+    let returned = events.iter()
+        .find(|e| e["event_type"] == "ItemStatusReturned")
+        .expect("ItemStatusReturned must be emitted");
+
+    assert_eq!(returned["payload"]["current_status"].as_str().unwrap(), "todo",
+        "effective status must be the vocabulary mapping for the TODO marker");
+    assert_eq!(returned["payload"]["status_source"].as_str().unwrap(), "marker_derived",
+        "status_source must be 'marker_derived' when effective status comes from a task marker");
+}
+
+#[test]
+fn test_marker_derived_emits_no_failure_signal() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, MARKER_SCHEMA);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "TODO Deploy by Friday")]);
+
+    run_binary(&dir, &["get", ITEM_TASK]);
+
+    let events = read_is_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(!types.contains(&"ItemStatusUnrecognized"),
+        "marker-derived status must NOT emit ItemStatusUnrecognized");
+    assert!(!types.iter().any(|t| t.contains("Failed")),
+        "marker-derived resolution must not emit any failure event");
+}
+
+// ── R5: Explicit status takes precedence over marker (HP3) ───────────────────
+
+#[test]
+fn test_explicit_status_overrides_marker_derived() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, MARKER_SCHEMA);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "TODO Deploy by Friday")]);
+
+    run_binary(&dir, &["set-status", ITEM_TASK, "doing"]);
+    run_binary(&dir, &["get", ITEM_TASK]);
+
+    let events = read_is_events(&dir);
+    let returned = events.iter()
+        .find(|e| e["event_type"] == "ItemStatusReturned")
+        .expect("ItemStatusReturned must be emitted");
+
+    assert_eq!(returned["payload"]["current_status"].as_str().unwrap(), "doing",
+        "explicit set-status must override marker-derived status");
+    assert_eq!(returned["payload"]["status_source"].as_str().unwrap(), "explicit",
+        "status_source must be 'explicit' when an explicit ItemStatusUpdated event exists");
+}
+
+// ── R5: Unmapped marker → proposed-value fallback (HP4) ──────────────────────
+
+#[test]
+fn test_unmapped_marker_falls_through_to_proposed_value() {
+    let dir = setup_temp_dir();
+    // Schema with no marker mappings for "NOW"
+    write_project_schema(&dir, MARKER_SCHEMA);
+    seed_with_proposed(&dir, SESSION_A, &[
+        (ITEM_TASK, "task", "NOW Deploy by Friday", Some("todo"), None),
+    ]);
+
+    run_binary(&dir, &["get", ITEM_TASK]);
+
+    let events = read_is_events(&dir);
+    let returned = events.iter()
+        .find(|e| e["event_type"] == "ItemStatusReturned")
+        .expect("ItemStatusReturned must be emitted");
+
+    assert_eq!(returned["payload"]["current_status"].as_str().unwrap(), "todo",
+        "unmapped marker must fall through to proposed status");
+    assert_eq!(returned["payload"]["status_source"].as_str().unwrap(), "proposed",
+        "status_source must be 'proposed' when marker is unmapped and proposed value exists");
+}
+
+#[test]
+fn test_unmapped_marker_emits_no_failure_signal() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, MARKER_SCHEMA);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "NOW Deploy by Friday")]);
+
+    run_binary(&dir, &["get", ITEM_TASK]);
+
+    let events = read_is_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(!types.iter().any(|t| t.contains("Failed")),
+        "unmapped marker must produce no failure signal");
+    assert!(!types.contains(&"ItemStatusUnrecognized"),
+        "unmapped marker must not emit ItemStatusUnrecognized");
+}
+
+// ── R5: Stale recorded status (HP5) ──────────────────────────────────────────
+
+#[test]
+fn test_stale_status_emits_item_status_unrecognized() {
+    let dir = setup_temp_dir();
+    // First: use a schema where "legacy_value" is valid, record the status
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  todo:
+  doing:
+  done:
+  waiting:
+  cancelled:
+  pending:
+  achieved:
+  missed:
+  open:
+  mitigated:
+  accepted:
+  closed:
+  in_progress:
+  resolved:
+  active:
+  inactive:
+  legacy_value:
+pageTypes:
+  Task:
+    allowedStatuses: [todo, doing, done, legacy_value]
+    aliases: [task]
+"#);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+    run_binary(&dir, &["set-status", ITEM_TASK, "legacy_value"]);
+
+    // Now: change schema so "legacy_value" is no longer recognized
+    write_project_schema(&dir, DEFAULT_SCHEMA);
+    run_binary(&dir, &["get", ITEM_TASK]);
+
+    let events = read_is_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"ItemStatusUnrecognized"),
+        "ItemStatusUnrecognized must be emitted when the recorded status is no longer in the vocabulary");
+}
+
+#[test]
+fn test_stale_status_unrecognized_emitted_before_returned() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  todo:
+  doing:
+  done:
+  waiting:
+  cancelled:
+  pending:
+  achieved:
+  missed:
+  open:
+  mitigated:
+  accepted:
+  closed:
+  in_progress:
+  resolved:
+  active:
+  inactive:
+  legacy_value:
+pageTypes:
+  Task:
+    allowedStatuses: [todo, doing, done, legacy_value]
+    aliases: [task]
+"#);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+    run_binary(&dir, &["set-status", ITEM_TASK, "legacy_value"]);
+
+    write_project_schema(&dir, DEFAULT_SCHEMA);
+    run_binary(&dir, &["get", ITEM_TASK]);
+
+    let events = read_is_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    let unrecognized_pos = types.iter().position(|&t| t == "ItemStatusUnrecognized")
+        .expect("ItemStatusUnrecognized must be present");
+    let returned_pos = types.iter().position(|&t| t == "ItemStatusReturned")
+        .expect("ItemStatusReturned must be present");
+
+    assert!(unrecognized_pos < returned_pos,
+        "ItemStatusUnrecognized must be emitted before ItemStatusReturned");
+}
+
+#[test]
+fn test_stale_status_still_returned_as_effective_status() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  todo:
+  doing:
+  done:
+  waiting:
+  cancelled:
+  pending:
+  achieved:
+  missed:
+  open:
+  mitigated:
+  accepted:
+  closed:
+  in_progress:
+  resolved:
+  active:
+  inactive:
+  legacy_value:
+pageTypes:
+  Task:
+    allowedStatuses: [todo, doing, done, legacy_value]
+    aliases: [task]
+"#);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+    run_binary(&dir, &["set-status", ITEM_TASK, "legacy_value"]);
+
+    write_project_schema(&dir, DEFAULT_SCHEMA);
+    run_binary(&dir, &["get", ITEM_TASK]);
+
+    let events = read_is_events(&dir);
+    let returned = events.iter()
+        .find(|e| e["event_type"] == "ItemStatusReturned")
+        .expect("ItemStatusReturned must be emitted");
+
+    assert_eq!(returned["payload"]["current_status"].as_str().unwrap(), "legacy_value",
+        "stale recorded status must still be returned as the effective status");
+    assert_eq!(returned["payload"]["status_source"].as_str().unwrap(), "explicit",
+        "status_source must be 'explicit' — the value came from an ItemStatusUpdated event");
+}
+
+#[test]
+fn test_stale_status_unrecognized_is_not_a_failure_event() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  todo:
+  doing:
+  done:
+  waiting:
+  cancelled:
+  pending:
+  achieved:
+  missed:
+  open:
+  mitigated:
+  accepted:
+  closed:
+  in_progress:
+  resolved:
+  active:
+  inactive:
+  legacy_value:
+pageTypes:
+  Task:
+    allowedStatuses: [todo, doing, done, legacy_value]
+    aliases: [task]
+"#);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+    run_binary(&dir, &["set-status", ITEM_TASK, "legacy_value"]);
+
+    write_project_schema(&dir, DEFAULT_SCHEMA);
+    let output = run_binary(&dir, &["get", ITEM_TASK]);
+
+    assert!(output.status.success(),
+        "get must exit successfully even when ItemStatusUnrecognized is emitted");
+
+    let events = read_is_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(types.contains(&"ItemStatusReturned"),
+        "ItemStatusReturned must still be emitted — ItemStatusUnrecognized is not a failure");
+}
+
+#[test]
+fn test_stale_status_unrecognized_payload() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  todo:
+  doing:
+  done:
+  waiting:
+  cancelled:
+  pending:
+  achieved:
+  missed:
+  open:
+  mitigated:
+  accepted:
+  closed:
+  in_progress:
+  resolved:
+  active:
+  inactive:
+  legacy_value:
+pageTypes:
+  Task:
+    allowedStatuses: [todo, doing, done, legacy_value]
+    aliases: [task]
+"#);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+    run_binary(&dir, &["set-status", ITEM_TASK, "legacy_value"]);
+
+    write_project_schema(&dir, DEFAULT_SCHEMA);
+    run_binary(&dir, &["get", ITEM_TASK]);
+
+    let events = read_is_events(&dir);
+    let unrecognized = events.iter()
+        .find(|e| e["event_type"] == "ItemStatusUnrecognized")
+        .expect("ItemStatusUnrecognized must be present");
+
+    assert_eq!(unrecognized["payload"]["item_id"].as_str().unwrap(), ITEM_TASK);
+    assert_eq!(unrecognized["payload"]["item_type"].as_str().unwrap(), "task");
+    assert_eq!(unrecognized["payload"]["recorded_status"].as_str().unwrap(), "legacy_value");
+}
+
+#[test]
+fn test_stale_status_unrecognized_emitted_exactly_once_per_get() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  todo:
+  doing:
+  done:
+  waiting:
+  cancelled:
+  pending:
+  achieved:
+  missed:
+  open:
+  mitigated:
+  accepted:
+  closed:
+  in_progress:
+  resolved:
+  active:
+  inactive:
+  legacy_value:
+pageTypes:
+  Task:
+    allowedStatuses: [todo, doing, done, legacy_value]
+    aliases: [task]
+"#);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+    run_binary(&dir, &["set-status", ITEM_TASK, "legacy_value"]);
+
+    write_project_schema(&dir, DEFAULT_SCHEMA);
+    run_binary(&dir, &["get", ITEM_TASK]);
+
+    let events = read_is_events(&dir);
+    let count = events.iter()
+        .filter(|e| e["event_type"] == "ItemStatusUnrecognized")
+        .count();
+
+    assert_eq!(count, 1,
+        "ItemStatusUnrecognized must be emitted exactly once per get invocation");
+}
+
+// ── R5: status_source field (ItemStatusReturned payload amendment) ────────────
+
+#[test]
+fn test_get_status_source_explicit_when_explicitly_set() {
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+    run_binary(&dir, &["set-status", ITEM_TASK, "doing"]);
+    run_binary(&dir, &["get", ITEM_TASK]);
+
+    let events = read_is_events(&dir);
+    let returned = events.iter()
+        .find(|e| e["event_type"] == "ItemStatusReturned")
+        .expect("ItemStatusReturned must be present");
+
+    assert_eq!(returned["payload"]["status_source"].as_str().unwrap(), "explicit",
+        "status_source must be 'explicit' when an ItemStatusUpdated event exists");
+}
+
+#[test]
+fn test_get_status_source_proposed_when_from_proposed_value() {
+    let dir = setup_temp_dir();
+    seed_with_proposed(&dir, SESSION_A, &[
+        (ITEM_TASK, "task", "Deploy by Friday", Some("todo"), None),
+    ]);
+    run_binary(&dir, &["get", ITEM_TASK]);
+
+    let events = read_is_events(&dir);
+    let returned = events.iter()
+        .find(|e| e["event_type"] == "ItemStatusReturned")
+        .expect("ItemStatusReturned must be present");
+
+    assert_eq!(returned["payload"]["status_source"].as_str().unwrap(), "proposed",
+        "status_source must be 'proposed' when effective status comes from proposed_status");
+}
+
+#[test]
+fn test_get_status_source_null_when_no_status_available() {
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+    run_binary(&dir, &["get", ITEM_TASK]);
+
+    let events = read_is_events(&dir);
+    let returned = events.iter()
+        .find(|e| e["event_type"] == "ItemStatusReturned")
+        .expect("ItemStatusReturned must be present");
+
+    assert!(returned["payload"]["status_source"].is_null(),
+        "status_source must be null when effective status is null");
+    assert!(returned["payload"]["current_status"].is_null(),
+        "current_status must also be null");
 }

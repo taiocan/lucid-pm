@@ -38,6 +38,8 @@ const VALID_EVENT_TYPES: &[&str] = &[
     "ItemStatusQueried",
     "ItemStatusReturned",
     "ItemStatusQueryFailedItemNotFound",
+    // R5: non-failure observational event for stale recorded status
+    "ItemStatusUnrecognized",
 ];
 
 const VALID_PRIORITIES: &[&str] = &["high", "medium", "low"];
@@ -248,6 +250,8 @@ fn test_happy_path_item_status_returned_payload() {
     assert!(p["item_type"].as_str().is_some(),  "item_type must be a string");
     assert!(p.get("current_status").is_some(),  "current_status field must be present");
     assert!(p.get("current_priority").is_some(),"current_priority field must be present");
+    // R5 payload amendment: status_source indicates which resolution step produced the value
+    assert!(p.get("status_source").is_some(),   "status_source field must be present (may be null)");
 }
 
 #[test]
@@ -337,4 +341,92 @@ fn test_happy_path_risk_get_returns_proposed_status_as_fallback() {
         "current_status must be 'open' (from proposed fallback — no explicit set-status for risk)");
     assert_eq!(returned["payload"]["current_priority"].as_str().unwrap(), "high",
         "current_priority must be 'high' (from explicit ItemPriorityUpdated)");
+}
+
+// ── R5: status_source field conformance ──────────────────────────────────────
+
+#[test]
+fn test_happy_path_task_item_status_returned_has_explicit_source() {
+    // Task item had explicit set-status → status_source must be "explicit"
+    let all = load_fixture("item_status_happy_path.jsonl");
+    let events = is_events(&all);
+
+    let task_item_id = "c3d4e5f6-a7b8-9012-cdef-012345678901";
+    let returned = events.iter()
+        .find(|e| e["event_type"].as_str() == Some("ItemStatusReturned")
+               && e["payload"]["item_id"].as_str() == Some(task_item_id))
+        .expect("ItemStatusReturned for task item must be present");
+
+    assert_eq!(returned["payload"]["status_source"].as_str().unwrap(), "explicit",
+        "status_source must be 'explicit' for the task item which had an explicit set-status");
+}
+
+#[test]
+fn test_happy_path_risk_item_status_returned_has_proposed_source() {
+    // Risk item had no set-status; proposed_status from extraction → status_source must be "proposed"
+    let all = load_fixture("item_status_happy_path.jsonl");
+    let events = is_events(&all);
+
+    let risk_item_id = "e5f6a7b8-c9d0-1234-ef01-234567890123";
+    let returned = events.iter()
+        .find(|e| e["event_type"].as_str() == Some("ItemStatusReturned")
+               && e["payload"]["item_id"].as_str() == Some(risk_item_id))
+        .expect("ItemStatusReturned for risk item must be present");
+
+    assert_eq!(returned["payload"]["status_source"].as_str().unwrap(), "proposed",
+        "status_source must be 'proposed' for the risk item which had only a proposed_status");
+}
+
+#[test]
+fn test_happy_path_status_source_values_are_valid() {
+    let all = load_fixture("item_status_happy_path.jsonl");
+    let events = is_events(&all);
+    const VALID_SOURCES: &[&str] = &["explicit", "marker_derived", "proposed"];
+
+    for event in events.iter().filter(|e| e["event_type"] == "ItemStatusReturned") {
+        let source = &event["payload"]["status_source"];
+        if !source.is_null() {
+            let s = source.as_str().expect("status_source must be a string or null");
+            assert!(VALID_SOURCES.contains(&s),
+                "status_source '{}' must be one of: explicit, marker_derived, proposed", s);
+        }
+    }
+}
+
+// ── R5: ItemStatusUnrecognized conformance ────────────────────────────────────
+
+#[test]
+fn test_happy_path_item_status_unrecognized_payload_shape() {
+    // This test passes vacuously if no ItemStatusUnrecognized events are present.
+    // When present, they must conform to the schema.
+    let all = load_fixture("item_status_happy_path.jsonl");
+    let events = is_events(&all);
+
+    for event in events.iter().filter(|e| e["event_type"] == "ItemStatusUnrecognized") {
+        let p = &event["payload"];
+        assert!(p["item_id"].as_str().is_some(),      "item_id must be a string");
+        assert!(p["item_type"].as_str().is_some(),     "item_type must be a string");
+        assert!(p["recorded_status"].as_str().is_some(),"recorded_status must be a string");
+    }
+}
+
+#[test]
+fn test_happy_path_unrecognized_precedes_returned_when_present() {
+    // If ItemStatusUnrecognized is in the fixture, it must precede the
+    // ItemStatusReturned event that shares its correlation_id.
+    let all = load_fixture("item_status_happy_path.jsonl");
+    let events = is_events(&all);
+
+    for unrecognized in events.iter().filter(|e| e["event_type"] == "ItemStatusUnrecognized") {
+        let cid = unrecognized["correlation_id"].as_str().unwrap();
+        let unrecognized_ts = unrecognized["timestamp"].as_u64().unwrap();
+        let returned_ts = events.iter()
+            .find(|e| e["event_type"] == "ItemStatusReturned"
+                   && e["correlation_id"].as_str() == Some(cid))
+            .map(|e| e["timestamp"].as_u64().unwrap())
+            .expect("ItemStatusReturned must follow ItemStatusUnrecognized");
+
+        assert!(unrecognized_ts <= returned_ts,
+            "ItemStatusUnrecognized must be emitted before ItemStatusReturned");
+    }
 }

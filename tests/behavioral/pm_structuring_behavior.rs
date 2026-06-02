@@ -160,7 +160,8 @@ fn test_items_extracted_payload_shape() {
         let actual_uncertain = items.iter().filter(|i| i["uncertain"].as_bool().unwrap_or(false)).count() as u64;
         assert_eq!(actual_uncertain, uncertain_count);
 
-        let valid_types = ["task", "milestone", "risk", "issue", "stakeholder"];
+        // R6: "unknown" is now a valid item_type (unrecognized vocabulary prediction)
+        let valid_types = ["task", "milestone", "risk", "issue", "stakeholder", "unknown"];
         for item in items {
             assert!(item.get("item_id").is_some(),    "item must have item_id");
             assert!(item.get("item_type").is_some(),  "item must have item_type");
@@ -169,7 +170,7 @@ fn test_items_extracted_payload_shape() {
 
             let item_type = item["item_type"].as_str().unwrap();
             assert!(valid_types.contains(&item_type),
-                "item_type '{}' must be one of: task, milestone, risk, issue, stakeholder", item_type);
+                "item_type '{}' must be vocabulary-recognized or 'unknown'", item_type);
 
             if item["uncertain"].as_bool().unwrap_or(false) {
                 assert!(!item["uncertainty_reason"].is_null(),
@@ -879,5 +880,341 @@ fn test_stdin_items_extracted_source_file_is_null() {
     if let Some(extracted) = events.iter().find(|e| e["event_type"] == "ItemsExtracted") {
         assert!(extracted["payload"]["source_file"].is_null(),
             "source_file must be null for stdin sessions");
+    }
+}
+
+// ── R6: item_type now includes "unknown" as a valid value ─────────────────────
+// Update the live extraction payload shape test to accept "unknown" alongside
+// the five standard types — it can appear when the LLM produces a type not
+// recognized by the active vocabulary.
+
+#[test]
+fn test_items_extracted_item_type_valid_includes_unknown() {
+    if !gemini_key_available() { return; }
+    let dir = setup_temp_dir();
+    run_binary(&dir, b"Set up CI pipeline by Friday. Bob is the release manager.\n");
+
+    let events = read_events(&dir);
+    if let Some(extracted) = events.iter().find(|e| e["event_type"] == "ItemsExtracted") {
+        let items = extracted["payload"]["items"].as_array().expect("items must be an array");
+        let valid_types = ["task", "milestone", "risk", "issue", "stakeholder", "unknown"];
+        for item in items {
+            let item_type = item["item_type"].as_str().unwrap();
+            assert!(valid_types.contains(&item_type),
+                "item_type '{}' must be vocabulary-recognized or 'unknown'", item_type);
+        }
+    }
+}
+
+// ── R6: HP5 — Proposed status null when outside vocabulary status set ─────────
+
+#[test]
+fn test_r6_proposed_status_null_when_outside_vocabulary_set() {
+    if !gemini_key_available() { return; }
+    let dir = setup_temp_dir();
+    // Vocabulary with a single recognized type and a single valid status ("scheduled").
+    // Any other status the LLM might propose (e.g., "todo", "open") is not in the
+    // vocabulary status set for this type and must be stored as null (HP5: silently set
+    // to null, no failure signal, item not marked uncertain).
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  scheduled:
+pageTypes:
+  Action:
+    allowedStatuses: [scheduled]
+    aliases: [action]
+"#);
+
+    run_binary_isolated(
+        &dir,
+        b"Deploy the new release. Fix the login bug. Review the architecture plan.\n",
+        &["--yes"],
+    );
+
+    let events = read_events(&dir);
+    if let Some(extracted) = events.iter().find(|e| e["event_type"] == "ItemsExtracted") {
+        let items = extracted["payload"]["items"].as_array().unwrap();
+        for item in items {
+            let item_type = item["item_type"].as_str().unwrap();
+            if item_type == "unknown" { continue; }
+            // HP5: proposed_status must be either the single valid value or null
+            if let Some(status) = item["proposed_status"].as_str() {
+                assert_eq!(status, "scheduled",
+                    "proposed_status '{}' for recognized type '{}' must be 'scheduled' (only valid \
+                    status in vocabulary) — out-of-vocabulary values must be null, not recorded (HP5)",
+                    status, item_type);
+            }
+            // HP5: an item is not marked uncertain solely due to out-of-vocab proposed_status
+            if item_type == "action" || item_type == "Action" {
+                assert!(!item["uncertain"].as_bool().unwrap_or(false),
+                    "HP5: out-of-vocabulary proposed_status must not mark the item as uncertain");
+            }
+        }
+    }
+}
+
+// ── R6: FP1 — SchemaInvalid aborts extraction (stdin mode) ───────────────────
+
+fn write_project_schema(dir: &TempDir, yaml: &str) {
+    fs::write(dir.path().join("project-schema.yaml"), yaml).unwrap();
+}
+
+fn read_all_events(dir: &TempDir) -> Vec<Value> {
+    let path = dir.path().join("events/runtime_events.jsonl");
+    if !path.exists() { return vec![]; }
+    fs::read_to_string(path).unwrap()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn test_r6_schema_invalid_stdin_text_submitted_not_emitted() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+
+    run_binary(&dir, b"Deploy the release by end of week.\n");
+
+    let events = read_all_events(&dir);
+    let pms_events: Vec<&Value> = events.iter()
+        .filter(|e| e["source_module"].as_str() == Some("pm_structuring"))
+        .collect();
+
+    assert!(pms_events.is_empty(),
+        "No pm_structuring events must be emitted when schema is invalid — TextSubmitted must not appear");
+}
+
+#[test]
+fn test_r6_schema_invalid_stdin_emits_project_schema_failure_event() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+
+    run_binary(&dir, b"Deploy the release by end of week.\n");
+
+    let events = read_all_events(&dir);
+    let failures: Vec<&Value> = events.iter()
+        .filter(|e| e["source_module"].as_str() == Some("project_schema"))
+        .filter(|e| matches!(e["event_type"].as_str(),
+            Some("SchemaParseError") | Some("SchemaValidationFailed")))
+        .collect();
+
+    assert!(!failures.is_empty(),
+        "project_schema module must emit a failure event when schema is invalid");
+}
+
+#[test]
+fn test_r6_schema_invalid_stdin_no_extraction_events_in_record() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+
+    run_binary(&dir, b"Deploy the release by end of week.\n");
+
+    let events = read_all_events(&dir);
+    let extraction_events: Vec<&Value> = events.iter()
+        .filter(|e| matches!(e["event_type"].as_str(),
+            Some("TextSubmitted") | Some("ItemsExtracted") |
+            Some("ExtractionConfirmed") | Some("ExtractionRejected")))
+        .collect();
+
+    assert!(extraction_events.is_empty(),
+        "No extraction events must be written when schema is invalid — project record is unchanged");
+}
+
+#[test]
+fn test_r6_schema_invalid_project_schema_failure_has_required_fields() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+
+    run_binary(&dir, b"Deploy the release by end of week.\n");
+
+    let events = read_all_events(&dir);
+    let failure = events.iter()
+        .find(|e| e["source_module"].as_str() == Some("project_schema")
+            && matches!(e["event_type"].as_str(),
+                Some("SchemaParseError") | Some("SchemaValidationFailed")))
+        .expect("project_schema failure event must be present");
+
+    assert!(failure["event_id"].as_str().is_some(),       "event_id must be a string");
+    assert!(failure["event_type"].as_str().is_some(),     "event_type must be a string");
+    assert!(failure["timestamp"].as_u64().is_some(),      "timestamp must be a u64");
+    assert!(failure["correlation_id"].as_str().is_some(), "correlation_id must be a string");
+    assert!(failure["source_module"].as_str().is_some(),  "source_module must be a string");
+    assert!(failure["payload"].is_object(),               "payload must be an object");
+}
+
+// ── R6: FP1 — SchemaInvalid aborts extraction (folder mode) ──────────────────
+// Schema failure aborts before FolderScanRequested per the event schema flow.
+
+#[test]
+fn test_r6_schema_invalid_folder_scan_requested_not_emitted() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+    fs::create_dir_all(dir.path().join("journal")).unwrap();
+
+    run_folder(&dir, "journal", &[]);
+
+    let events = read_all_events(&dir);
+    let types: Vec<&str> = events.iter()
+        .filter(|e| e["source_module"].as_str() == Some("pm_structuring"))
+        .map(|e| e["event_type"].as_str().unwrap())
+        .collect();
+
+    assert!(!types.contains(&"FolderScanRequested"),
+        "FolderScanRequested must NOT be emitted when schema is invalid — abort is before folder dispatch");
+    assert!(!types.contains(&"FolderScanCompleted"),
+        "FolderScanCompleted must NOT be emitted when schema is invalid");
+}
+
+#[test]
+fn test_r6_schema_invalid_folder_emits_project_schema_failure_event() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+    fs::create_dir_all(dir.path().join("journal")).unwrap();
+
+    run_folder(&dir, "journal", &[]);
+
+    let events = read_all_events(&dir);
+    let failures: Vec<&Value> = events.iter()
+        .filter(|e| e["source_module"].as_str() == Some("project_schema"))
+        .filter(|e| matches!(e["event_type"].as_str(),
+            Some("SchemaParseError") | Some("SchemaValidationFailed")))
+        .collect();
+
+    assert!(!failures.is_empty(),
+        "project_schema module must emit a failure event when schema is invalid in folder mode");
+}
+
+// ── R6: HP1 — Custom vocabulary governs type classification ──────────────────
+// These tests isolate the project schema by removing HOME from the child
+// process environment, which prevents load_and_validate from merging with
+// ~/.lucidpm/default-schema.yaml. The only recognized types are those
+// defined in the project-schema.yaml written to the temp dir.
+
+const CUSTOM_VOCAB_SCHEMA: &str = r#"schemaVersion: 1
+statuses:
+  pending:
+  active:
+  completed:
+  open:
+  resolved:
+  inactive:
+pageTypes:
+  Action:
+    allowedStatuses: [pending, active, completed]
+    aliases: [action]
+  Person:
+    allowedStatuses: [active, inactive]
+    aliases: [person]
+  Problem:
+    allowedStatuses: [open, resolved]
+    aliases: [problem]
+"#;
+
+// Like run_binary_with_args but removes HOME to prevent default schema merge.
+fn run_binary_isolated(dir: &TempDir, stdin_bytes: &[u8], args: &[&str]) -> std::process::Output {
+    let mut child = Command::new(binary_path())
+        .current_dir(dir.path())
+        .args(args)
+        .env_remove("HOME")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn binary");
+    child.stdin.as_mut().unwrap().write_all(stdin_bytes).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn test_r6_custom_vocabulary_item_types_are_vocabulary_recognized_or_unknown() {
+    if !gemini_key_available() { return; }
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, CUSTOM_VOCAB_SCHEMA);
+
+    // HOME removed: only CUSTOM_VOCAB_SCHEMA types are valid; standard types are unrecognized.
+    run_binary_isolated(
+        &dir,
+        b"Deploy the new release by end of week. Sarah is the release manager. Risk: vendor delays.\n",
+        &["--yes"],
+    );
+
+    let events = read_events(&dir);
+    if let Some(extracted) = events.iter().find(|e| e["event_type"] == "ItemsExtracted") {
+        let items = extracted["payload"]["items"].as_array().unwrap();
+        let recognized = ["action", "Action", "person", "Person", "problem", "Problem", "unknown"];
+        for item in items {
+            let item_type = item["item_type"].as_str().unwrap();
+            assert!(recognized.contains(&item_type),
+                "item_type '{}' must be vocabulary-recognized ('action', 'person', 'problem') or \
+                'unknown' — hardcoded legacy types are not in the active vocabulary",
+                item_type);
+        }
+    }
+}
+
+#[test]
+fn test_r6_custom_vocabulary_proposed_status_from_vocabulary_status_set() {
+    if !gemini_key_available() { return; }
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, CUSTOM_VOCAB_SCHEMA);
+
+    run_binary_isolated(
+        &dir,
+        b"Deploy the new release by end of week. Sarah is the release manager. Risk: vendor delays.\n",
+        &["--yes"],
+    );
+
+    let events = read_events(&dir);
+    if let Some(extracted) = events.iter().find(|e| e["event_type"] == "ItemsExtracted") {
+        let items = extracted["payload"]["items"].as_array().unwrap();
+        let valid_statuses = ["pending", "active", "completed", "open", "resolved", "inactive"];
+        for item in items {
+            let item_type = item["item_type"].as_str().unwrap();
+            if item_type == "unknown" {
+                // HP4: unrecognized type → proposed_status must be null
+                assert!(item["proposed_status"].is_null(),
+                    "item_type='unknown' must have proposed_status=null (HP4)");
+            } else if let Some(status) = item["proposed_status"].as_str() {
+                // HP3: recognized type → proposed_status from vocabulary status set
+                assert!(valid_statuses.contains(&status),
+                    "proposed_status '{}' for item_type '{}' must be from the vocabulary status set",
+                    status, item_type);
+            }
+        }
+    }
+}
+
+#[test]
+fn test_r6_unknown_item_satisfies_uncertainty_invariants() {
+    if !gemini_key_available() { return; }
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, CUSTOM_VOCAB_SCHEMA);
+
+    // HOME removed: standard types (task, milestone, etc.) are unrecognized → stored as "unknown".
+    run_binary_isolated(
+        &dir,
+        b"Deploy the new release by end of week. Sarah is the release manager. Risk: vendor delays.\n",
+        &["--yes"],
+    );
+
+    let events = read_events(&dir);
+    if let Some(extracted) = events.iter().find(|e| e["event_type"] == "ItemsExtracted") {
+        let items = extracted["payload"]["items"].as_array().unwrap();
+        for item in items {
+            if item["item_type"].as_str() == Some("unknown") {
+                // HP2: unrecognized type → uncertain=true, uncertainty_reason set, proposed_status=null
+                assert_eq!(item["uncertain"].as_bool().unwrap_or(false), true,
+                    "item_type='unknown' must have uncertain=true (HP2)");
+                assert!(!item["uncertainty_reason"].is_null(),
+                    "item_type='unknown' must have a non-null uncertainty_reason (HP2)");
+                let reason = item["uncertainty_reason"].as_str().unwrap();
+                assert!(reason.contains("not recognized"),
+                    "uncertainty_reason must identify the type as unrecognized by the vocabulary, got: '{}'",
+                    reason);
+                assert!(item["proposed_status"].is_null(),
+                    "item_type='unknown' must have proposed_status=null (HP4)");
+            }
+        }
     }
 }

@@ -8,6 +8,10 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+use project_schema::{
+    load_and_validate, logseq_forward_label, logseq_inverse_label, resolve_type,
+};
+
 const EVENTS_FILE: &str = "events/runtime_events.jsonl";
 const SOURCE_MODULE: &str = "item_links";
 
@@ -133,7 +137,6 @@ fn confirmed_items_for_session(events: &[Value], session_id: &str) -> Vec<(Strin
         .collect()
 }
 
-// Returns item_id → (item_type, description)
 fn build_item_registry(events: &[Value]) -> HashMap<String, (String, String)> {
     let sessions = incorporated_sessions(events);
     let mut registry = HashMap::new();
@@ -145,7 +148,6 @@ fn build_item_registry(events: &[Value]) -> HashMap<String, (String, String)> {
     registry
 }
 
-// Replay ItemLinked/ItemUnlinked events to get current link set
 fn build_links(events: &[Value]) -> Vec<LinkRecord> {
     let mut links: Vec<LinkRecord> = Vec::new();
     for e in events {
@@ -171,46 +173,6 @@ fn build_links(events: &[Value]) -> Vec<LinkRecord> {
     links
 }
 
-fn is_valid_for_types(link_type: &str, source_type: &str, target_type: &str) -> bool {
-    match link_type {
-        "blocks"       => matches!(source_type, "task"|"issue")
-                       && matches!(target_type, "task"|"milestone"),
-        "affects"      => matches!(source_type, "risk"|"issue")
-                       && matches!(target_type, "task"|"milestone"|"stakeholder"),
-        "assigned_to"  => matches!(source_type, "task"|"issue")
-                       && target_type == "stakeholder",
-        "mitigated_by" => source_type == "risk" && target_type == "task",
-        "escalates_to" => matches!(source_type, "risk"|"issue")
-                       && target_type == "stakeholder",
-        "related_to"   => true,
-        _              => false,
-    }
-}
-
-fn forward_label(link_type: &str) -> &'static str {
-    match link_type {
-        "blocks"       => "Blocks",
-        "affects"      => "Affects",
-        "assigned_to"  => "Assigned To",
-        "mitigated_by" => "Mitigated By",
-        "escalates_to" => "Escalated To",
-        "related_to"   => "Related To",
-        _              => "Links To",
-    }
-}
-
-fn inverse_label(link_type: &str) -> &'static str {
-    match link_type {
-        "blocks"       => "Blocked By",
-        "affects"      => "Affected By",
-        "assigned_to"  => "Owns",
-        "mitigated_by" => "Mitigates",
-        "escalates_to" => "Escalations",
-        "related_to"   => "Related To",
-        _              => "Linked From",
-    }
-}
-
 fn display_item(id: &str, registry: &HashMap<String, (String, String)>) -> String {
     match registry.get(id) {
         Some((ty, desc)) => format!("[{}] {} ({}...)", ty, desc, &id[..8.min(id.len())]),
@@ -220,6 +182,13 @@ fn display_item(id: &str, registry: &HashMap<String, (String, String)>) -> Strin
 
 fn cmd_add(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+
+    // Schema load before any link operation event — abort if schema invalid.
+    // project_schema emits the schema failure event and prints to stderr.
+    let schema = match load_and_validate(Path::new("."), Path::new(EVENTS_FILE), &correlation_id) {
+        Some(s) => s,
+        None => return Ok(()),
+    };
 
     emit_event("LinkAddRequested", &correlation_id, json!({
         "source_id": source_id,
@@ -259,23 +228,53 @@ fn cmd_add(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
         }
     };
 
-    // Validate link type and type-pair compatibility
-    if !is_valid_for_types(link_type, source_type, target_type) {
+    // Check source entity type is recognized by the active vocabulary
+    if resolve_type(&schema, source_type).is_none() {
         eprintln!(
-            "Link type '{}' is not valid from a '{}' to a '{}'.",
-            link_type, source_type, target_type
+            "Item '{}' has entity type '{}' not recognized by the active vocabulary.",
+            source_id, source_type
         );
-        emit_event("LinkFailedInvalidLinkType", &correlation_id, json!({
-            "failure_reason": "invalid_link_type",
-            "link_type":      link_type,
-            "source_type":    source_type,
-            "target_type":    target_type,
+        emit_event("LinkFailedItemTypeUnrecognized", &correlation_id, json!({
+            "failure_reason": "item_type_unrecognized",
+            "item_id":        source_id,
+            "item_type":      source_type,
+            "role":           "source",
+        }));
+        return Ok(());
+    }
+
+    // Check target entity type is recognized by the active vocabulary
+    if resolve_type(&schema, target_type).is_none() {
+        eprintln!(
+            "Item '{}' has entity type '{}' not recognized by the active vocabulary.",
+            target_id, target_type
+        );
+        emit_event("LinkFailedItemTypeUnrecognized", &correlation_id, json!({
+            "failure_reason": "item_type_unrecognized",
+            "item_id":        target_id,
+            "item_type":      target_type,
+            "role":           "target",
+        }));
+        return Ok(());
+    }
+
+    // Check relation type is defined in the active vocabulary
+    if !schema.relations.contains_key(link_type) {
+        eprintln!(
+            "Relation type '{}' is not defined in the active vocabulary.",
+            link_type
+        );
+        emit_event("LinkFailedRelationTypeUnrecognized", &correlation_id, json!({
+            "failure_reason": "relation_type_unrecognized",
+            "relation_type":  link_type,
         }));
         return Ok(());
     }
 
     // Check for duplicate
-    if links.iter().any(|l| l.source_id == source_id && l.link_type == link_type && l.target_id == target_id) {
+    if links.iter().any(|l| {
+        l.source_id == source_id && l.link_type == link_type && l.target_id == target_id
+    }) {
         eprintln!("Link already exists: {} --[{}]--> {}", source_id, link_type, target_id);
         emit_event("LinkFailedDuplicateLink", &correlation_id, json!({
             "failure_reason": "duplicate_link",
@@ -306,6 +305,16 @@ fn cmd_add(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
 fn cmd_remove(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
 
+    // Schema load is required by contract: all link commands perform schema validation
+    // before execution, even though link removal itself does not use vocabulary data.
+    // Vocabulary is intentionally not consulted for removal — the contract invariant
+    // "Vocabulary evolution never prevents removal of an existing link" ensures that
+    // a schema change can never leave the project record in an uncleanable state.
+    let _schema = match load_and_validate(Path::new("."), Path::new(EVENTS_FILE), &correlation_id) {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
     emit_event("LinkRemoveRequested", &correlation_id, json!({
         "source_id": source_id,
         "link_type": link_type,
@@ -316,7 +325,6 @@ fn cmd_remove(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
     let registry = build_item_registry(&events);
     let links    = build_links(&events);
 
-    // Validate source exists
     if !registry.contains_key(source_id) {
         eprintln!("Item '{}' not found in project record.", source_id);
         emit_event("LinkFailedItemNotFound", &correlation_id, json!({
@@ -327,7 +335,6 @@ fn cmd_remove(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Validate target exists
     if !registry.contains_key(target_id) {
         eprintln!("Item '{}' not found in project record.", target_id);
         emit_event("LinkFailedItemNotFound", &correlation_id, json!({
@@ -338,8 +345,9 @@ fn cmd_remove(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Check link exists
-    if !links.iter().any(|l| l.source_id == source_id && l.link_type == link_type && l.target_id == target_id) {
+    if !links.iter().any(|l| {
+        l.source_id == source_id && l.link_type == link_type && l.target_id == target_id
+    }) {
         eprintln!("Link not found: {} --[{}]--> {}", source_id, link_type, target_id);
         emit_event("LinkFailedLinkNotFound", &correlation_id, json!({
             "failure_reason": "link_not_found",
@@ -368,6 +376,12 @@ fn cmd_remove(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
 fn cmd_list(item_id: Option<&str>) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
 
+    // Schema load before any link operation event — abort if schema invalid.
+    let schema = match load_and_validate(Path::new("."), Path::new(EVENTS_FILE), &correlation_id) {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
     emit_event("LinkListRequested", &correlation_id, json!({
         "item_id": item_id,
     }));
@@ -377,86 +391,97 @@ fn cmd_list(item_id: Option<&str>) -> Result<()> {
     let links    = build_links(&events);
 
     let mut link_entries: Vec<Value> = Vec::new();
+    let mut excluded_count: u32 = 0;
 
-    match item_id {
-        None => {
-            for l in &links {
-                let src_ty = registry.get(&l.source_id).map(|(t, _)| t.as_str()).unwrap_or("unknown");
-                let tgt_ty = registry.get(&l.target_id).map(|(t, _)| t.as_str()).unwrap_or("unknown");
-                link_entries.push(json!({
-                    "source_id":     l.source_id,
-                    "source_type":   src_ty,
-                    "link_type":     l.link_type,
-                    "target_id":     l.target_id,
-                    "target_type":   tgt_ty,
-                    "direction":     "outgoing",
-                    "display_label": forward_label(&l.link_type),
-                }));
+    let candidate_links: Vec<(&LinkRecord, &str)> = match item_id {
+        None => links.iter().map(|l| (l, "outgoing")).collect(),
+        Some(iid) => links.iter().filter_map(|l| {
+            if l.source_id == iid {
+                Some((l, "outgoing"))
+            } else if l.target_id == iid {
+                Some((l, "incoming"))
+            } else {
+                None
             }
+        }).collect(),
+    };
+
+    for (l, direction) in candidate_links {
+        // Exclude links with unrecognized relation types, emitting one
+        // LinkRelationTypeUnknown event per excluded link.
+        if !schema.relations.contains_key(l.link_type.as_str()) {
+            emit_event("LinkRelationTypeUnknown", &correlation_id, json!({
+                "source_id": l.source_id,
+                "link_type": l.link_type,
+                "target_id": l.target_id,
+            }));
+            excluded_count += 1;
+            eprintln!(
+                "warning: link relation type '{}' not recognized by active vocabulary \
+                 (source: {}, target: {}); excluded from output",
+                l.link_type, l.source_id, l.target_id
+            );
+            continue;
         }
-        Some(iid) => {
-            for l in &links {
-                if l.source_id == iid {
-                    let src_ty = registry.get(&l.source_id).map(|(t, _)| t.as_str()).unwrap_or("unknown");
-                    let tgt_ty = registry.get(&l.target_id).map(|(t, _)| t.as_str()).unwrap_or("unknown");
-                    link_entries.push(json!({
-                        "source_id":     l.source_id,
-                        "source_type":   src_ty,
-                        "link_type":     l.link_type,
-                        "target_id":     l.target_id,
-                        "target_type":   tgt_ty,
-                        "direction":     "outgoing",
-                        "display_label": forward_label(&l.link_type),
-                    }));
-                } else if l.target_id == iid {
-                    let src_ty = registry.get(&l.source_id).map(|(t, _)| t.as_str()).unwrap_or("unknown");
-                    let tgt_ty = registry.get(&l.target_id).map(|(t, _)| t.as_str()).unwrap_or("unknown");
-                    link_entries.push(json!({
-                        "source_id":     l.source_id,
-                        "source_type":   src_ty,
-                        "link_type":     l.link_type,
-                        "target_id":     l.target_id,
-                        "target_type":   tgt_ty,
-                        "direction":     "incoming",
-                        "display_label": inverse_label(&l.link_type),
-                    }));
-                }
-            }
-        }
+
+        let src_ty = registry.get(&l.source_id).map(|(t, _)| t.as_str()).unwrap_or("unknown");
+        let tgt_ty = registry.get(&l.target_id).map(|(t, _)| t.as_str()).unwrap_or("unknown");
+
+        let display_label = if direction == "outgoing" {
+            logseq_forward_label(&schema, &l.link_type)
+        } else {
+            logseq_inverse_label(&schema, &l.link_type)
+        };
+
+        link_entries.push(json!({
+            "source_id":     l.source_id,
+            "source_type":   src_ty,
+            "link_type":     l.link_type,
+            "target_id":     l.target_id,
+            "target_type":   tgt_ty,
+            "direction":     direction,
+            "display_label": display_label,
+        }));
     }
 
     let link_count = link_entries.len();
 
     emit_event("LinkListReturned", &correlation_id, json!({
-        "item_id":    item_id,
-        "link_count": link_count,
-        "links":      &link_entries,
+        "item_id":                         item_id,
+        "link_count":                      link_count,
+        "links":                           &link_entries,
+        "links_excluded_relation_unknown": excluded_count,
     }));
 
-    if link_count == 0 {
+    if link_count == 0 && excluded_count == 0 {
         println!("No links found.");
     } else {
-        println!("{} link(s):\n", link_count);
-        for e in &link_entries {
-            let label  = e["display_label"].as_str().unwrap_or("");
-            let src_id = e["source_id"].as_str().unwrap_or("");
-            let tgt_id = e["target_id"].as_str().unwrap_or("");
-            let dir    = e["direction"].as_str().unwrap_or("outgoing");
-            if dir == "outgoing" {
-                println!(
-                    "  [{:<14}]  {}  -->  {}",
-                    label,
-                    display_item(src_id, &registry),
-                    display_item(tgt_id, &registry),
-                );
-            } else {
-                println!(
-                    "  [{:<14}]  {}  <--  {}",
-                    label,
-                    display_item(tgt_id, &registry),
-                    display_item(src_id, &registry),
-                );
+        if link_count > 0 {
+            println!("{} link(s):\n", link_count);
+            for e in &link_entries {
+                let label  = e["display_label"].as_str().unwrap_or("");
+                let src_id = e["source_id"].as_str().unwrap_or("");
+                let tgt_id = e["target_id"].as_str().unwrap_or("");
+                let dir    = e["direction"].as_str().unwrap_or("outgoing");
+                if dir == "outgoing" {
+                    println!(
+                        "  [{:<14}]  {}  -->  {}",
+                        label,
+                        display_item(src_id, &registry),
+                        display_item(tgt_id, &registry),
+                    );
+                } else {
+                    println!(
+                        "  [{:<14}]  {}  <--  {}",
+                        label,
+                        display_item(tgt_id, &registry),
+                        display_item(src_id, &registry),
+                    );
+                }
             }
+        }
+        if excluded_count > 0 {
+            println!("\n{} link(s) excluded: relation type not in active vocabulary.", excluded_count);
         }
     }
 

@@ -37,6 +37,9 @@ The purpose of this project is to evaluate the functionality of Codeos by develo
 | journal | free-form notes and meeting minutes in dated txt/md files per project | 9 | COMPLETE |
 | R2 (pm_structuring) | folder ingestion with deduplication via event log — --folder mode | 9 | COMPLETE |
 | project_schema | schema-driven entity vocabulary, renderer config, deadline universality, alias support | 9 | COMPLETE |
+| R4 (item_links) | schema-driven type matrix and relation labels | 9 | COMPLETE |
+| R5 (item_status) | schema-driven status vocabulary and task marker mapping | 9 | COMPLETE |
+| R6 (pm_structuring) | schema-driven entity types at extraction | 9 | COMPLETE |
 
 Stages: 1-Intent / 2-Contract / 3-Schema / 4-Implement / 5-Tests / 6-Observe / 7-Reconcile / 8-Replay / 9-Refine
 

@@ -3,6 +3,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use project_schema::{load_and_validate, ProjectSchema};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -52,7 +53,6 @@ fn get_folder_arg() -> Option<String> {
     None
 }
 
-// Returns filenames already recorded in ItemsExtracted.source_file across all prior runs.
 fn already_processed_files() -> HashSet<String> {
     let mut set = HashSet::new();
     let content = match fs::read_to_string(EVENTS_FILE) {
@@ -73,9 +73,8 @@ fn already_processed_files() -> HashSet<String> {
 }
 
 // Runs the full extraction pipeline for a single block of text.
-// source_file is None for stdin sessions, Some(filename) for folder-mode runs.
-// Exits the process on unrecoverable failures (empty input, API failure).
-async fn run_extraction(source_text: String, source_file: Option<&str>, auto_confirm: bool) {
+// Schema is validated before this function is called; it is passed as a reference.
+async fn run_extraction(source_text: String, source_file: Option<&str>, auto_confirm: bool, schema: &ProjectSchema) {
     let correlation_id = Uuid::new_v4().to_string();
 
     emit_event("TextSubmitted", &correlation_id, json!({
@@ -91,7 +90,7 @@ async fn run_extraction(source_text: String, source_file: Option<&str>, auto_con
         std::process::exit(1);
     }
 
-    let items = match extract_items(&source_text).await {
+    let items = match extract_items(&source_text, schema).await {
         Ok(items) => items,
         Err(e) => {
             eprintln!("Error: API request failed: {}", e);
@@ -171,7 +170,7 @@ async fn run_extraction(source_text: String, source_file: Option<&str>, auto_con
     }
 }
 
-async fn cmd_folder(folder_path: String, auto_confirm: bool) {
+async fn cmd_folder(folder_path: String, auto_confirm: bool, schema: &ProjectSchema) {
     let folder_correlation_id = Uuid::new_v4().to_string();
 
     emit_event("FolderScanRequested", &folder_correlation_id, json!({
@@ -225,7 +224,7 @@ async fn cmd_folder(folder_path: String, auto_confirm: bool) {
                 continue;
             }
             println!("\n=== Processing: {} ===", filename);
-            run_extraction(content, Some(filename), auto_confirm).await;
+            run_extraction(content, Some(filename), auto_confirm, schema).await;
             files_processed += 1;
         }
 
@@ -246,8 +245,16 @@ async fn cmd_folder(folder_path: String, auto_confirm: bool) {
 async fn main() {
     let auto_confirm = has_yes_flag();
 
+    // Schema load before any command event — abort if schema invalid (FP1: SchemaInvalid).
+    // project_schema emits the failure event and prints to stderr; we just exit.
+    let schema_check_cid = Uuid::new_v4().to_string();
+    let schema = match load_and_validate(Path::new("."), Path::new(EVENTS_FILE), &schema_check_cid) {
+        Some(s) => s,
+        None => std::process::exit(1),
+    };
+
     if let Some(folder_path) = get_folder_arg() {
-        cmd_folder(folder_path, auto_confirm).await;
+        cmd_folder(folder_path, auto_confirm, &schema).await;
         return;
     }
 
@@ -260,5 +267,5 @@ async fn main() {
         source_text.push('\n');
     }
     let source_text = source_text.trim_end().to_string();
-    run_extraction(source_text, None, auto_confirm).await;
+    run_extraction(source_text, None, auto_confirm, &schema).await;
 }

@@ -30,6 +30,15 @@ Existing `pm_structuring` and `project_state` event schemas are untouched. Multi
 | R2 | `pm_structuring` Stage 9 — folder ingestion | Refine | F10 | Additive (source_file field to ItemsExtracted) | COMPLETE |
 | R3 | `logseq_export` + `logseq_sync` Stage 9 — canonical Logseq format | Refine | F2, F3 | None (format change only) | COMPLETE |
 | F11 | `project_schema` | 1 — Foundation | project_state, item_status, logseq_export, logseq_sync, item_links | None (configuration layer only; additive to 5 existing modules) | COMPLETE |
+| R4 | `item_links` Stage 9 — schema-driven type matrix and relation labels | Refine | F7, F11 | None | COMPLETE |
+| R5 | `item_status` Stage 9 — schema-driven status vocabulary and task marker mapping | Refine | F1, F11 | None | COMPLETE |
+| R6 | `pm_structuring` Stage 9 — schema-driven entity types at extraction | Refine | pm_structuring, F11 | None | BACKLOG |
+| R7 | `priority_view` Stage 9 — schema integration | Refine | F5, F11 | None | BACKLOG |
+| R8 | `report_export` Stage 9 — schema integration | Refine | F6, F11 | None | BACKLOG |
+| R9 | `logseq_sync` Stage 9 — schema-driven status validation | Refine | F3, F11, R5 | None | BACKLOG |
+| R10 | `project_state` Stage 9 — schema integration (view) | Refine | project_state, F11 | None | BACKLOG |
+| R11 | `ontology_suggest` Stage 9 — schema-driven proposals | Refine | F9, F11, R4, R5 | None | BACKLOG |
+| F12 | `task_model` — task persistence and lifecycle sync | 7 — Task Layer | F11, F3, F7 | New schema (TaskCreated, TaskMarkerUpdated, TaskPropertyUpdated, TaskDeleted, TaskSyncCompleted, TaskCreationFailed) | BACKLOG |
 
 Note: F2 depends on R1 so that Logseq export can include AI-proposed values from extraction.
 
@@ -70,6 +79,23 @@ R2  pm_structuring Stage 9  ← --folder <path> mode: scan journal/ for new .txt
 ─────────────────────────────────────────────────────────────
 F11 project_schema     ← schema-driven entity vocabulary, renderer config,
                           deadline universality, alias support
+─────────────────────────────────────────────────────────────
+R4  item_links Stage 9         ← schema-driven type matrix and relation labels
+                                  (critical: removes hardcoded-matrix conflict)
+R5  item_status Stage 9   ✅ COMPLETE
+─────────────────────────────────────────────────────────────
+R6  pm_structuring Stage 9     ← schema-driven entity types at extraction
+R7  priority_view Stage 9      ← schema filter validation + SchemaTypeUnknown exclusion
+R8  report_export Stage 9      ← full schema integration (labels, exclusion, aliases)
+─────────────────────────────────────────────────────────────
+R9  logseq_sync Stage 9        ← schema-driven status validation (depends on R5)
+R10 project_state Stage 9      ← alias resolution + SchemaTypeUnknown in view
+─────────────────────────────────────────────────────────────
+R11 ontology_suggest Stage 9   ← schema-driven proposals (depends on R4, R5)
+─────────────────────────────────────────────────────────────
+F12 task_model                 ← task instance persistence + Logseq task block sync;
+                                  activates blockTypes marker mapping from F11 schema;
+                                  enables tasks in priority_view, item_links, ontology_suggest
 ```
 
 F1 + R1 + F2 deliver: extraction with AI-suggested state → structured record → live Logseq pages.
