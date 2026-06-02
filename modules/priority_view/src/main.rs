@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use project_schema::{all_status_names, emit_type_unknown, load_and_validate, resolve_type, ProjectSchema};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
@@ -10,14 +11,7 @@ use uuid::Uuid;
 const EVENTS_FILE: &str = "events/runtime_events.jsonl";
 const SOURCE_MODULE: &str = "priority_view";
 
-const VALID_TYPES: &[&str] = &["task", "milestone", "risk", "issue", "stakeholder"];
 const VALID_PRIORITIES: &[&str] = &["high", "medium", "low"];
-const VALID_STATUSES: &[&str] = &[
-    "todo", "doing", "done", "waiting", "cancelled",
-    "pending", "achieved", "missed",
-    "open", "in_progress", "resolved", "closed",
-    "active", "inactive",
-];
 
 #[derive(Parser)]
 #[command(about = "LucidPM priority-ranked item view")]
@@ -208,6 +202,11 @@ fn effective_status_priority(events: &[Value], item_id: &str) -> (Option<String>
     (last_status, last_priority)
 }
 
+// Check whether a status string is present in the vocabulary's global status union.
+fn status_in_vocabulary(schema: &ProjectSchema, status: &str) -> bool {
+    all_status_names(schema).contains(&status)
+}
+
 fn cmd_view(
     filter_type: Option<&str>,
     filter_status: Option<&str>,
@@ -215,16 +214,44 @@ fn cmd_view(
 ) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
 
+    // Schema load before any priority_view event — abort if schema invalid (FP1: SchemaInvalid).
+    // project_schema emits the failure event and prints to stderr.
+    let schema = match load_and_validate(Path::new("."), Path::new(EVENTS_FILE), &correlation_id) {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
     emit_event("PriorityViewRequested", &correlation_id, json!({
         "filter_type":     filter_type,
         "filter_status":   filter_status,
         "filter_priority": filter_priority,
     }));
 
-    // Contract failure: InvalidFilter
+    let events = read_events()?;
+    let sessions = incorporated_sessions(&events);
+
+    let all_items: Vec<(String, String, String, String)> = sessions.iter()
+        .flat_map(|sid| {
+            confirmed_items_for_session(&events, sid)
+                .into_iter()
+                .map(|(id, ty, desc)| (id, ty, desc, sid.clone()))
+        })
+        .collect();
+
+    // Contract failure: EmptyRecord (project record empty before any exclusion).
+    if all_items.is_empty() {
+        eprintln!("No items in project record.");
+        emit_event("PriorityViewFailedEmptyRecord", &correlation_id, json!({
+            "failure_reason": "empty_record",
+        }));
+        return Ok(());
+    }
+
+    // Contract failure: InvalidFilter — validate type and status against active vocabulary.
+    // Priority filter remains hardcoded (not schema-driven in this release).
     if let Some(t) = filter_type {
-        if !VALID_TYPES.contains(&t) {
-            eprintln!("Invalid --type '{}'. Valid values: {}", t, VALID_TYPES.join(", "));
+        if resolve_type(&schema, t).is_none() {
+            eprintln!("Invalid --type '{}'. Value is not recognized by the active vocabulary.", t);
             emit_event("PriorityViewFailedInvalidFilter", &correlation_id, json!({
                 "failure_reason": "invalid_filter",
                 "filter_field":   "type",
@@ -234,8 +261,8 @@ fn cmd_view(
         }
     }
     if let Some(s) = filter_status {
-        if !VALID_STATUSES.contains(&s) {
-            eprintln!("Invalid --status '{}'. Valid values: {}", s, VALID_STATUSES.join(", "));
+        if !status_in_vocabulary(&schema, s) {
+            eprintln!("Invalid --status '{}'. Value is not in the active vocabulary.", s);
             emit_event("PriorityViewFailedInvalidFilter", &correlation_id, json!({
                 "failure_reason": "invalid_filter",
                 "filter_field":   "status",
@@ -256,35 +283,31 @@ fn cmd_view(
         }
     }
 
-    let events = read_events()?;
-    let sessions = incorporated_sessions(&events);
-
-    let all_items: Vec<(String, String, String, String)> = sessions.iter()
-        .flat_map(|sid| {
-            confirmed_items_for_session(&events, sid)
-                .into_iter()
-                .map(|(id, ty, desc)| (id, ty, desc, sid.clone()))
-        })
-        .collect();
-
-    // Contract failure: EmptyRecord
-    if all_items.is_empty() {
-        eprintln!("No items in project record.");
-        emit_event("PriorityViewFailedEmptyRecord", &correlation_id, json!({
-            "failure_reason": "empty_record",
-        }));
-        return Ok(());
-    }
-
+    // Build item summaries, excluding items with unrecognized entity types.
+    // emit_type_unknown (source_module: "project_schema") is called per excluded item.
     let mut summaries: Vec<ItemSummary> = all_items.into_iter()
-        .map(|(item_id, item_type, description, session_id)| {
+        .filter_map(|(item_id, item_type, description, session_id)| {
+            if resolve_type(&schema, &item_type).is_none() {
+                emit_type_unknown(
+                    Path::new(EVENTS_FILE),
+                    &item_id,
+                    &item_type,
+                    &correlation_id,
+                );
+                return None;
+            }
             let (status, priority) = effective_status_priority(&events, &item_id);
-            ItemSummary { item_id, item_type, description, session_id, status, priority }
+            Some(ItemSummary { item_id, item_type, description, session_id, status, priority })
         })
         .collect();
 
-    // Apply filters (conjunctive — contract invariant)
-    if let Some(t) = filter_type     { summaries.retain(|i| i.item_type == t); }
+    // Apply filters (conjunctive — contract invariant).
+    // Type filter uses alias resolution: filter value and stored type both resolved to
+    // canonical name before comparison, so --type epic matches items stored as "Initiative".
+    if let Some(t) = filter_type {
+        let canonical_filter = resolve_type(&schema, t);
+        summaries.retain(|i| resolve_type(&schema, &i.item_type) == canonical_filter);
+    }
     if let Some(s) = filter_status   { summaries.retain(|i| i.status.as_deref() == Some(s)); }
     if let Some(p) = filter_priority { summaries.retain(|i| i.priority.as_deref() == Some(p)); }
 

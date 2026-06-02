@@ -137,6 +137,34 @@ fn read_pv_events(dir: &TempDir) -> Vec<Value> {
         .collect()
 }
 
+fn write_project_schema(dir: &TempDir, yaml: &str) {
+    fs::write(dir.path().join("project-schema.yaml"), yaml).unwrap();
+}
+
+/// Read ALL events from the log (all source_modules).
+fn read_all_events(dir: &TempDir) -> Vec<Value> {
+    let path = dir.path().join("events/runtime_events.jsonl");
+    if !path.exists() { return vec![]; }
+    fs::read_to_string(path).unwrap()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .collect()
+}
+
+/// Like run_binary but removes HOME to prevent default schema merge.
+fn run_binary_isolated(dir: &TempDir, args: &[&str]) -> std::process::Output {
+    Command::new(binary_path())
+        .current_dir(dir.path())
+        .args(args)
+        .env_remove("HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("Failed to run binary")
+}
+
 const SESSION_A: &str = "a4ca3a7e-61eb-4f36-b59e-f3abd166e351";
 
 const ITEM_TASK_HIGH_DOING:   &str = "b1000000-0000-0000-0000-000000000001";
@@ -671,4 +699,389 @@ fn test_separate_invocations_have_different_correlation_ids() {
     assert_eq!(cids.len(), 2, "must have two PriorityViewRequested events");
     assert_ne!(cids[0], cids[1],
         "different invocations must produce different correlation_ids");
+}
+
+// ── R7: Schema-driven filters ─────────────────────────────────────────────────
+
+// Vocabulary schemas used by isolated tests (HOME removed to prevent default merge).
+
+const CUSTOM_VOCAB: &str = r#"schemaVersion: 1
+statuses:
+  backlog:
+  in_flight:
+  shipped:
+  open:
+  resolved:
+pageTypes:
+  Feature:
+    allowedStatuses: [backlog, in_flight, shipped]
+    aliases: [feature]
+  Bug:
+    allowedStatuses: [open, resolved]
+    aliases: [bug]
+"#;
+
+const ALIAS_VOCAB: &str = r#"schemaVersion: 1
+statuses:
+  active:
+  inactive:
+pageTypes:
+  Initiative:
+    allowedStatuses: [active, inactive]
+    aliases: [epic]
+"#;
+
+const ITEM_FEATURE_1: &str = "f1000000-0000-0000-0000-000000000001";
+const _ITEM_FEATURE_2: &str = "f1000000-0000-0000-0000-000000000002";
+const ITEM_BUG_1:     &str = "f1000000-0000-0000-0000-000000000003";
+const ITEM_WIDGET:    &str = "f1000000-0000-0000-0000-000000000004";
+const ITEM_WIDGET_2:  &str = "f1000000-0000-0000-0000-000000000005";
+const ITEM_INITIATIVE: &str = "f1000000-0000-0000-0000-000000000006";
+const ITEM_EPIC:       &str = "f1000000-0000-0000-0000-000000000007";
+
+// ── R7: HP1 — Custom vocabulary type filter succeeds ─────────────────────────
+
+#[test]
+fn test_r7_custom_vocabulary_type_filter_succeeds() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, CUSTOM_VOCAB);
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_FEATURE_1, "feature", "Ship search feature"),
+        (ITEM_BUG_1,     "bug",     "Login crashes on mobile"),
+    ]);
+
+    run_binary_isolated(&dir, &["--type", "feature"]);
+
+    let events = read_pv_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"PriorityViewReturned"),
+        "PriorityViewReturned must be emitted for a valid custom vocabulary type filter");
+    assert!(!types.contains(&"PriorityViewFailedInvalidFilter"),
+        "InvalidFilter must NOT be emitted when type is recognized by the active vocabulary");
+
+    let returned = events.iter().find(|e| e["event_type"] == "PriorityViewReturned").unwrap();
+    let items = returned["payload"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "only the feature item should be returned");
+    assert_eq!(items[0]["item_id"].as_str().unwrap(), ITEM_FEATURE_1);
+}
+
+#[test]
+fn test_r7_type_filter_rejected_when_not_in_active_vocabulary() {
+    // With isolated custom vocab (Feature/Bug only), "task" is not recognized.
+    // This verifies filter validation uses the vocabulary, not a hardcoded list.
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, CUSTOM_VOCAB);
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_FEATURE_1, "feature", "Ship search feature"),
+    ]);
+
+    run_binary_isolated(&dir, &["--type", "task"]);
+
+    let events = read_pv_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"PriorityViewFailedInvalidFilter"),
+        "InvalidFilter must be emitted when type is not in the active vocabulary");
+    assert!(!types.contains(&"PriorityViewReturned"),
+        "PriorityViewReturned must NOT be emitted on InvalidFilter");
+
+    let failure = events.iter()
+        .find(|e| e["event_type"] == "PriorityViewFailedInvalidFilter")
+        .unwrap();
+    assert_eq!(failure["payload"]["filter_field"].as_str().unwrap(), "type");
+    assert_eq!(failure["payload"]["filter_value"].as_str().unwrap(), "task");
+}
+
+// ── R7: HP2 — Alias filter matching is bidirectional ─────────────────────────
+
+#[test]
+fn test_r7_alias_filter_matches_items_stored_as_canonical() {
+    // Filter by alias "epic"; items stored as canonical "Initiative" must be returned.
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, ALIAS_VOCAB);
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_INITIATIVE, "Initiative", "Q3 growth initiative"),
+    ]);
+
+    run_binary_isolated(&dir, &["--type", "epic"]);
+
+    let events = read_pv_events(&dir);
+    let returned = events.iter()
+        .find(|e| e["event_type"] == "PriorityViewReturned")
+        .expect("PriorityViewReturned must be emitted");
+
+    let items = returned["payload"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1,
+        "item stored as canonical 'Initiative' must be matched by alias filter 'epic'");
+    assert_eq!(items[0]["item_id"].as_str().unwrap(), ITEM_INITIATIVE);
+}
+
+#[test]
+fn test_r7_canonical_filter_matches_items_stored_as_alias() {
+    // Filter by canonical "Initiative"; items stored as alias "epic" must be returned.
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, ALIAS_VOCAB);
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_EPIC, "epic", "Q4 growth epic"),
+    ]);
+
+    run_binary_isolated(&dir, &["--type", "Initiative"]);
+
+    let events = read_pv_events(&dir);
+    let returned = events.iter()
+        .find(|e| e["event_type"] == "PriorityViewReturned")
+        .expect("PriorityViewReturned must be emitted");
+
+    let items = returned["payload"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1,
+        "item stored as alias 'epic' must be matched by canonical filter 'Initiative'");
+    assert_eq!(items[0]["item_id"].as_str().unwrap(), ITEM_EPIC);
+}
+
+#[test]
+fn test_r7_alias_filter_matches_both_canonical_and_alias_stored_items() {
+    // Filter by alias; items stored as canonical AND alias are both returned.
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, ALIAS_VOCAB);
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_INITIATIVE, "Initiative", "Q3 growth initiative"),
+        (ITEM_EPIC,       "epic",       "Q4 growth epic"),
+    ]);
+
+    run_binary_isolated(&dir, &["--type", "epic"]);
+
+    let events = read_pv_events(&dir);
+    let returned = events.iter()
+        .find(|e| e["event_type"] == "PriorityViewReturned")
+        .expect("PriorityViewReturned must be emitted");
+
+    let items = returned["payload"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2,
+        "both the canonical-stored and alias-stored items must be returned by an alias filter");
+}
+
+// ── R7: HP3 — Unrecognized items excluded; command completes ─────────────────
+// Uses default schema (no isolation needed); "widget" is not a recognized type.
+
+#[test]
+fn test_r7_unrecognized_item_excluded_from_result() {
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_TASK_HIGH_DOING, "task",   "Fix critical bug"),
+        (ITEM_WIDGET,          "widget", "Some widget"),
+    ]);
+
+    run_binary(&dir, &[]);
+
+    let events = read_pv_events(&dir);
+    let returned = events.iter()
+        .find(|e| e["event_type"] == "PriorityViewReturned")
+        .expect("PriorityViewReturned must be emitted — unrecognized type is not a failure");
+
+    let items = returned["payload"]["items"].as_array().unwrap();
+    assert!(items.iter().all(|i| i["item_id"].as_str() != Some(ITEM_WIDGET)),
+        "item with unrecognized type must be excluded from the result");
+    assert_eq!(items.len(), 1, "only the recognized-type task item must appear");
+}
+
+#[test]
+fn test_r7_schema_type_unknown_emitted_for_excluded_item() {
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_TASK_HIGH_DOING, "task",   "Fix critical bug"),
+        (ITEM_WIDGET,          "widget", "Some widget"),
+    ]);
+
+    run_binary(&dir, &[]);
+
+    let all = read_all_events(&dir);
+    let unknown_events: Vec<&Value> = all.iter()
+        .filter(|e| e["source_module"].as_str() == Some("project_schema")
+            && e["event_type"].as_str() == Some("SchemaTypeUnknown"))
+        .collect();
+
+    assert_eq!(unknown_events.len(), 1,
+        "SchemaTypeUnknown must be emitted exactly once for the excluded widget item");
+    assert_eq!(unknown_events[0]["payload"]["item_id"].as_str().unwrap(), ITEM_WIDGET);
+    assert_eq!(unknown_events[0]["payload"]["unknown_type"].as_str().unwrap(), "widget");
+}
+
+#[test]
+fn test_r7_unrecognized_item_exclusion_command_completes_successfully() {
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_TASK_HIGH_DOING, "task",   "Fix critical bug"),
+        (ITEM_WIDGET,          "widget", "Some widget"),
+    ]);
+
+    let output = run_binary(&dir, &[]);
+
+    assert!(output.status.success(),
+        "command must exit successfully even when items with unrecognized types are excluded");
+
+    let events = read_pv_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(types.contains(&"PriorityViewReturned"),
+        "PriorityViewReturned must be emitted — exclusion is not a failure");
+    assert!(!types.contains(&"PriorityViewFailedEmptyRecord"),
+        "EmptyRecord must NOT fire when recognized-type items remain after exclusion");
+}
+
+// ── R7: HP4 — All items unrecognized; empty result, not EmptyRecord ──────────
+
+#[test]
+fn test_r7_all_items_unrecognized_returns_empty_result_not_failure() {
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_WIDGET,   "widget", "Some widget"),
+        (ITEM_WIDGET_2, "gadget", "Some gadget"),
+    ]);
+
+    run_binary(&dir, &[]);
+
+    let events = read_pv_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"PriorityViewReturned"),
+        "PriorityViewReturned must be emitted even when all items are excluded");
+    assert!(!types.contains(&"PriorityViewFailedEmptyRecord"),
+        "EmptyRecord must NOT fire — the project record is not empty, only all types are unrecognized");
+
+    let returned = events.iter().find(|e| e["event_type"] == "PriorityViewReturned").unwrap();
+    assert_eq!(returned["payload"]["item_count"].as_u64().unwrap(), 0,
+        "item_count must be 0 when all items are excluded");
+}
+
+#[test]
+fn test_r7_all_items_unrecognized_schema_type_unknown_per_item() {
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_WIDGET,   "widget", "Some widget"),
+        (ITEM_WIDGET_2, "gadget", "Some gadget"),
+    ]);
+
+    run_binary(&dir, &[]);
+
+    let all = read_all_events(&dir);
+    let unknown_count = all.iter()
+        .filter(|e| e["source_module"].as_str() == Some("project_schema")
+            && e["event_type"].as_str() == Some("SchemaTypeUnknown"))
+        .count();
+
+    assert_eq!(unknown_count, 2,
+        "SchemaTypeUnknown must be emitted once per excluded item");
+}
+
+// ── R7: HP5 — Status globally valid but inapplicable to filtered type ─────────
+// Key design decision: status filter validates against the global vocabulary
+// union, not a per-type subset. A globally valid status that doesn't match
+// any item of the filtered type produces an empty result — not an error.
+
+#[test]
+fn test_r7_status_globally_valid_but_locally_inapplicable_accepted() {
+    // Feature allows [backlog, in_flight, shipped]; Bug allows [open, resolved].
+    // Filter --type feature --status open: "open" is in the global union (from Bug),
+    // so the filter is accepted. No features have status "open" → empty result.
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, CUSTOM_VOCAB);
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_FEATURE_1, "feature", "Ship search feature"),
+        (ITEM_BUG_1,     "bug",     "Login crash"),
+    ]);
+    seed_status(&dir, ITEM_FEATURE_1, "feature", "in_flight");
+    seed_status(&dir, ITEM_BUG_1,     "bug",     "open");
+
+    run_binary_isolated(&dir, &["--type", "feature", "--status", "open"]);
+
+    let events = read_pv_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(!types.contains(&"PriorityViewFailedInvalidFilter"),
+        "InvalidFilter must NOT fire — 'open' is in the global vocabulary status union");
+    assert!(types.contains(&"PriorityViewReturned"),
+        "PriorityViewReturned must be emitted — empty result is not a failure");
+
+    let returned = events.iter().find(|e| e["event_type"] == "PriorityViewReturned").unwrap();
+    assert_eq!(returned["payload"]["item_count"].as_u64().unwrap(), 0,
+        "no features have status 'open' — result is correctly empty");
+}
+
+#[test]
+fn test_r7_status_not_in_vocabulary_union_rejected() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, CUSTOM_VOCAB);
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_FEATURE_1, "feature", "Ship search feature"),
+    ]);
+
+    // "todo" is not in CUSTOM_VOCAB's statuses at all
+    run_binary_isolated(&dir, &["--status", "todo"]);
+
+    let events = read_pv_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"PriorityViewFailedInvalidFilter"),
+        "InvalidFilter must be emitted when status is not in the vocabulary union");
+    let failure = events.iter()
+        .find(|e| e["event_type"] == "PriorityViewFailedInvalidFilter").unwrap();
+    assert_eq!(failure["payload"]["filter_field"].as_str().unwrap(), "status");
+    assert_eq!(failure["payload"]["filter_value"].as_str().unwrap(), "todo");
+}
+
+// ── R7: FP1 — SchemaInvalid aborts before PriorityViewRequested ──────────────
+
+#[test]
+fn test_r7_schema_invalid_priority_view_requested_not_emitted() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_TASK_HIGH_DOING, "task", "Fix critical bug"),
+    ]);
+
+    run_binary(&dir, &[]);
+
+    let events = read_pv_events(&dir);
+    assert!(events.is_empty(),
+        "No priority_view events must be emitted when the vocabulary is invalid");
+}
+
+#[test]
+fn test_r7_schema_invalid_emits_project_schema_failure_event() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_TASK_HIGH_DOING, "task", "Fix critical bug"),
+    ]);
+
+    run_binary(&dir, &[]);
+
+    let all = read_all_events(&dir);
+    let failures: Vec<&Value> = all.iter()
+        .filter(|e| e["source_module"].as_str() == Some("project_schema"))
+        .filter(|e| matches!(e["event_type"].as_str(),
+            Some("SchemaParseError") | Some("SchemaValidationFailed")))
+        .collect();
+
+    assert!(!failures.is_empty(),
+        "project_schema must emit a failure event when the vocabulary file is invalid");
+}
+
+#[test]
+fn test_r7_schema_invalid_project_record_unchanged() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_TASK_HIGH_DOING, "task", "Fix critical bug"),
+    ]);
+
+    run_binary(&dir, &[]);
+
+    // No priority_view events, no item list returned, project record unchanged
+    let all = read_all_events(&dir);
+    let pv_events_count = all.iter()
+        .filter(|e| e["source_module"].as_str() == Some("priority_view"))
+        .count();
+    assert_eq!(pv_events_count, 0,
+        "no priority_view events must be written when vocabulary is invalid");
 }

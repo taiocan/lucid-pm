@@ -40,6 +40,7 @@ The purpose of this project is to evaluate the functionality of Codeos by develo
 | R4 (item_links) | schema-driven type matrix and relation labels | 9 | COMPLETE |
 | R5 (item_status) | schema-driven status vocabulary and task marker mapping | 9 | COMPLETE |
 | R6 (pm_structuring) | schema-driven entity types at extraction | 9 | COMPLETE |
+| R7 (priority_view) | schema-driven filter validation and unrecognized item exclusion | 9 | COMPLETE |
 
 Stages: 1-Intent / 2-Contract / 3-Schema / 4-Implement / 5-Tests / 6-Observe / 7-Reconcile / 8-Replay / 9-Refine
 
