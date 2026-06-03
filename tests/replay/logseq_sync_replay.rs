@@ -34,6 +34,7 @@ const VALID_EVENT_TYPES: &[&str] = &[
     "SyncCompletedNoChanges",
     "SyncFailedGraphNotAccessible",
     "SyncFailedEmptyRecord",
+    "SyncFailedSchemaInvalid",  // R9: schema load failure
 ];
 
 // ── Schema conformance ────────────────────────────────────────────────────────

@@ -14,9 +14,53 @@ fn binary_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_logseq_sync"))
 }
 
+// Minimal default vocabulary matching the installed ~/.lucidpm/default-schema.yaml.
+// Makes tests portable and provides the backward-compatibility regression baseline:
+// all status values valid under the pre-R9 hardcoded table must remain valid here.
+const DEFAULT_SCHEMA: &str = r#"schemaVersion: 1
+statuses:
+  todo:
+  doing:
+  done:
+  waiting:
+  cancelled:
+  pending:
+  achieved:
+  missed:
+  open:
+  mitigated:
+  accepted:
+  closed:
+  in_progress:
+  resolved:
+  active:
+  inactive:
+pageTypes:
+  Task:
+    allowedStatuses: [todo, doing, done, waiting, cancelled]
+    aliases: [task]
+  Milestone:
+    allowedStatuses: [pending, achieved, missed]
+    aliases: [milestone]
+  Risk:
+    allowedStatuses: [open, mitigated, accepted, closed]
+    aliases: [risk]
+  Issue:
+    allowedStatuses: [open, in_progress, resolved, closed]
+    aliases: [issue]
+  Stakeholder:
+    allowedStatuses: [active, inactive]
+    aliases: [stakeholder]
+"#;
+
+fn write_project_schema(dir: &TempDir, yaml: &str) {
+    fs::write(dir.path().join("project-schema.yaml"), yaml).unwrap();
+}
+
 fn setup_temp_dir() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir(dir.path().join("events")).unwrap();
+    write_project_schema(&dir, DEFAULT_SCHEMA);
     dir
 }
 
@@ -134,10 +178,11 @@ fn read_ls_events(dir: &TempDir) -> Vec<Value> {
         .collect()
 }
 
-const SESSION_A:    &str = "a4ca3a7e-61eb-4f36-b59e-f3abd166e351";
-const ITEM_TASK:    &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee01";
-const ITEM_RISK:    &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee02";
+const SESSION_A:      &str = "a4ca3a7e-61eb-4f36-b59e-f3abd166e351";
+const ITEM_TASK:      &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee01";
+const ITEM_RISK:      &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee02";
 const ITEM_MILESTONE: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee03";
+const ITEM_CUSTOM:    &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee04";
 
 // ── Happy Path 1: Successful Sync With Changes ────────────────────────────────
 
@@ -678,4 +723,280 @@ fn test_separate_invocations_have_different_correlation_ids() {
     assert_eq!(cids.len(), 2);
     assert_ne!(cids[0], cids[1],
         "Different invocations must produce different correlation_ids");
+}
+
+// ── R9: Schema Load Failure (FP1) ─────────────────────────────────────────────
+
+#[test]
+fn test_schema_load_failed_emits_sync_requested_then_schema_invalid() {
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+    fs::create_dir_all(format!("{}/pages", graph_dir)).unwrap();
+    write_logseq_page(&graph_dir, ITEM_TASK, "task", "Deploy by Friday", Some("todo"), None);
+    // Overwrite schema with invalid YAML
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+
+    run_binary(&dir, &graph_dir);
+
+    let events = read_ls_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"SyncRequested"),          "SyncRequested must be emitted");
+    assert!(types.contains(&"SyncFailedSchemaInvalid"),"SyncFailedSchemaInvalid must be emitted");
+    assert!(!types.contains(&"SyncCompleted"),          "SyncCompleted must NOT be emitted");
+    assert!(!types.contains(&"SyncCompletedNoChanges"), "SyncCompletedNoChanges must NOT be emitted");
+    assert!(!types.contains(&"ItemStatusUpdated"),      "No Logseq pages read — ItemStatusUpdated must NOT be emitted");
+}
+
+#[test]
+fn test_schema_load_failed_payload_shape() {
+    let dir = setup_temp_dir();
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+    fs::create_dir_all(format!("{}/pages", graph_dir)).unwrap();
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+
+    run_binary(&dir, &graph_dir);
+
+    let events = read_ls_events(&dir);
+    let failure = events.iter().find(|e| e["event_type"] == "SyncFailedSchemaInvalid")
+        .expect("SyncFailedSchemaInvalid not found");
+
+    assert_eq!(failure["payload"]["failure_reason"].as_str().unwrap(), "schema_load_failed");
+}
+
+#[test]
+fn test_schema_load_failed_requested_precedes_failure() {
+    let dir = setup_temp_dir();
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+    fs::create_dir_all(format!("{}/pages", graph_dir)).unwrap();
+    write_project_schema(&dir, "this: is: not: valid: yaml: [[[");
+
+    run_binary(&dir, &graph_dir);
+
+    let events = read_ls_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    let req_pos  = types.iter().position(|&t| t == "SyncRequested").unwrap();
+    let fail_pos = types.iter().position(|&t| t == "SyncFailedSchemaInvalid").unwrap();
+    assert!(req_pos < fail_pos, "SyncRequested must precede SyncFailedSchemaInvalid");
+}
+
+// ── R9: Custom Vocabulary Accepted (HP1) ──────────────────────────────────────
+
+#[test]
+fn test_custom_vocabulary_status_accepted_as_valid() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  reviewing:
+pageTypes:
+  Inspector:
+    allowedStatuses: [reviewing]
+"#);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_CUSTOM, "Inspector", "Audit checklist")]);
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+    write_logseq_page(&graph_dir, ITEM_CUSTOM, "Inspector", "Audit checklist", Some("reviewing"), None);
+
+    run_binary(&dir, &graph_dir);
+
+    let events = read_ls_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"ItemStatusUpdated"),           "Custom vocabulary status must be accepted");
+    assert!(!types.contains(&"ItemSyncSkippedInvalidStatus"), "No skip event for valid custom status");
+
+    let updated = events.iter().find(|e| e["event_type"] == "ItemStatusUpdated").unwrap();
+    assert_eq!(updated["payload"]["item_id"].as_str().unwrap(),  ITEM_CUSTOM);
+    assert_eq!(updated["payload"]["new_status"].as_str().unwrap(), "reviewing");
+}
+
+// ── Invariant Falsification ───────────────────────────────────────────────────
+
+// IF-1: No hardcoded status table consulted
+// Fixture: custom status "reviewing" absent from any hardcoded table.
+// Wrong assumption: hardcoded table consulted → "reviewing" not found → rejected.
+// Correct: vocabulary defines "reviewing" for "Inspector" → accepted.
+#[test]
+fn test_vocabulary_defined_set_falsifies_hardcoded_table() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  reviewing:
+pageTypes:
+  Inspector:
+    allowedStatuses: [reviewing]
+"#);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_CUSTOM, "Inspector", "Audit checklist")]);
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+    write_logseq_page(&graph_dir, ITEM_CUSTOM, "Inspector", "Audit checklist", Some("reviewing"), None);
+
+    run_binary(&dir, &graph_dir);
+
+    let events = read_ls_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(types.contains(&"ItemStatusUpdated"),             "IF-1: custom status must be accepted via vocabulary");
+    assert!(!types.contains(&"ItemSyncSkippedInvalidStatus"), "IF-1: no skip — hardcoded table must not be consulted");
+}
+
+// IF-2: No entity type name is a hardcode special case
+// Fixture: completely new type "Inspector" not present in any hardcoded branch.
+// Wrong assumption: match/branch on known type names → "Inspector" falls through → empty status set.
+// Correct: vocabulary defines "Inspector" with statuses → "scheduled" accepted.
+#[test]
+fn test_unknown_type_name_falsifies_hardcoded_type_branching() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  scheduled:
+  done:
+pageTypes:
+  Inspector:
+    allowedStatuses: [scheduled, done]
+"#);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_CUSTOM, "Inspector", "Site visit")]);
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+    write_logseq_page(&graph_dir, ITEM_CUSTOM, "Inspector", "Site visit", Some("scheduled"), None);
+
+    run_binary(&dir, &graph_dir);
+
+    let events = read_ls_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(types.contains(&"ItemStatusUpdated"),             "IF-2: unknown type must be handled via vocabulary");
+    assert!(!types.contains(&"ItemSyncSkippedInvalidStatus"), "IF-2: no skip — type name must not gate validation");
+}
+
+// IF-3: Alias resolves to same status set as canonical (acceptance path)
+// Fixture: canonical "Risk", alias "risk"; status "identified" defined for "Risk" concept.
+// Item stored with type "risk" (alias form).
+// Wrong assumption: page_types.get("risk") → None → false → "identified" rejected.
+// Correct: resolve("risk") → "Risk", page_types.get("Risk") → allowedStatuses contains "identified" → accepted.
+#[test]
+fn test_alias_acceptance_falsifies_string_comparison() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  identified:
+pageTypes:
+  Risk:
+    allowedStatuses: [identified]
+    aliases: [risk]
+"#);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_RISK, "risk", "Supply chain risk")]);
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+    write_logseq_page(&graph_dir, ITEM_RISK, "risk", "Supply chain risk", Some("identified"), None);
+
+    run_binary(&dir, &graph_dir);
+
+    let events = read_ls_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(types.contains(&"ItemStatusUpdated"),             "IF-3: alias item must accept status via canonical resolution");
+    assert!(!types.contains(&"ItemSyncSkippedInvalidStatus"), "IF-3: no skip — alias resolved to canonical status set");
+}
+
+// IF-4: Alias rejection path is consistent with canonical rejection
+// Fixture: same vocabulary; item stored as "risk"; Logseq shows "closed" (not in "Risk" set).
+// Wrong assumption: alias resolution applied only on acceptance path → incorrect outcome on rejection.
+// Correct: resolve("risk") → "Risk" → "closed" not in ["identified"] → ItemSyncSkippedInvalidStatus.
+#[test]
+fn test_alias_rejection_falsifies_acceptance_only_resolution() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  identified:
+pageTypes:
+  Risk:
+    allowedStatuses: [identified]
+    aliases: [risk]
+"#);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_RISK, "risk", "Supply chain risk")]);
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+    // "closed" is not in the "Risk" concept's allowed statuses
+    write_logseq_page(&graph_dir, ITEM_RISK, "risk", "Supply chain risk", Some("closed"), None);
+
+    run_binary(&dir, &graph_dir);
+
+    let events = read_ls_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(types.contains(&"ItemSyncSkippedInvalidStatus"), "IF-4: alias item must be rejected via canonical resolution");
+    assert!(!types.contains(&"ItemStatusUpdated"),           "IF-4: no status update for rejected item");
+
+    let skipped = events.iter().find(|e| e["event_type"] == "ItemSyncSkippedInvalidStatus").unwrap();
+    assert_eq!(skipped["payload"]["rejected_status"].as_str().unwrap(), "closed");
+}
+
+// IF-5: Representation Ban — canonical-casing fixture
+// Fixture: canonical "Risk" (uppercase R), alias "risk" (lowercase); status "open" valid for "Risk".
+// Item type stored as "risk" (lowercase alias). Page shows "open".
+// Wrong assumption: page_types.get("risk") → None (key is "Risk") → false → spurious skip.
+// Correct: resolve_type("risk") → "Risk", page_types.get("Risk") → "open" in allowedStatuses → accepted.
+#[test]
+fn test_representation_ban_falsifies_direct_string_comparison() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, r#"schemaVersion: 1
+statuses:
+  open:
+pageTypes:
+  Risk:
+    allowedStatuses: [open]
+    aliases: [risk]
+"#);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_RISK, "risk", "Vendor risk")]);
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+    write_logseq_page(&graph_dir, ITEM_RISK, "risk", "Vendor risk", Some("open"), None);
+
+    run_binary(&dir, &graph_dir);
+
+    let events = read_ls_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(types.contains(&"ItemStatusUpdated"),             "IF-5: representation ban — stored alias must resolve correctly");
+    assert!(!types.contains(&"ItemSyncSkippedInvalidStatus"), "IF-5: no spurious skip due to casing mismatch");
+}
+
+// IF-6: Default vocabulary preserves pre-R9 behavior (backward compatibility regression)
+// Fixture: DEFAULT_SCHEMA matches the pre-R9 hardcoded table exactly.
+// "todo" was valid for "task" before R9; must remain valid with vocabulary-driven validation.
+// Wrong assumption: default vocabulary differs from old table → previously valid status rejected.
+#[test]
+fn test_default_vocabulary_preserves_pre_r9_behavior() {
+    // setup_temp_dir() writes DEFAULT_SCHEMA which mirrors the old hardcoded table
+    let dir = setup_temp_dir();
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_TASK, "task", "Deploy by Friday")]);
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+    // "todo" was valid for "task" in the old hardcoded table
+    write_logseq_page(&graph_dir, ITEM_TASK, "task", "Deploy by Friday", Some("todo"), None);
+
+    run_binary(&dir, &graph_dir);
+
+    let events = read_ls_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(types.contains(&"ItemStatusUpdated"),             "IF-6: pre-R9 valid status must still be accepted");
+    assert!(!types.contains(&"ItemSyncSkippedInvalidStatus"), "IF-6: no regression — backward compat preserved");
+}
+
+// ── R9 Stage 9 Refinement: empty allowedStatuses edge case ───────────────────
+
+// Contract FP2 note: "this applies equally when the entity type concept's
+// vocabulary-defined status set is empty — any Logseq status for an item of
+// that type triggers ItemSyncSkippedInvalidStatus."
+#[test]
+fn test_empty_allowed_statuses_rejects_any_status() {
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, r#"schemaVersion: 1
+pageTypes:
+  Classified:
+    allowedStatuses: []
+"#);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_CUSTOM, "Classified", "Restricted item")]);
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+    write_logseq_page(&graph_dir, ITEM_CUSTOM, "Classified", "Restricted item", Some("open"), None);
+
+    run_binary(&dir, &graph_dir);
+
+    let events = read_ls_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(types.contains(&"ItemSyncSkippedInvalidStatus"),
+        "Type with empty allowedStatuses must reject any Logseq status");
+    assert!(!types.contains(&"ItemStatusUpdated"),
+        "No status update for type with empty allowedStatuses");
 }

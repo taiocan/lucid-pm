@@ -42,6 +42,7 @@ The purpose of this project is to evaluate the functionality of Codeos by develo
 | R6 (pm_structuring) | schema-driven entity types at extraction | 9 | COMPLETE |
 | R7 (priority_view) | schema-driven filter validation and unrecognized item exclusion | 9 | COMPLETE |
 | R8 (report_export) | schema-driven section grouping, canonical labels, and unrecognized item exclusion | 9 | COMPLETE |
+| R9 (logseq_sync) | schema-driven status validation; alias resolution; SyncFailedSchemaInvalid | 9 | COMPLETE |
 
 Stages: 1-Intent / 2-Contract / 3-Schema / 4-Implement / 5-Tests / 6-Observe / 7-Reconcile / 8-Replay / 9-Refine
 

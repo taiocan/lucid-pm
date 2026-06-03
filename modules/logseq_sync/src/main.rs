@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use project_schema::{load_and_validate, resolve_type, ProjectSchema};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -24,15 +25,20 @@ struct RecordedItem {
     item_type: String,
 }
 
-fn valid_statuses_for_type(item_type: &str) -> &'static [&'static str] {
-    match item_type {
-        "task"        => &["todo", "doing", "done", "waiting", "cancelled"],
-        "milestone"   => &["pending", "achieved", "missed"],
-        "risk"        => &["open", "mitigated", "accepted", "closed"],
-        "issue"       => &["open", "in_progress", "resolved", "closed"],
-        "stakeholder" => &["active", "inactive"],
-        _             => &[],
-    }
+// Representation Ban: domain logic operates on vocabulary-resolved concept identity.
+// resolve_type maps any stored representation (alias or canonical) to the concept
+// before the status set lookup. No string literal representing a vocabulary concept
+// appears in domain logic below this boundary.
+fn vocabulary_allows_status(schema: &ProjectSchema, item_type: &str, status: &str) -> bool {
+    let canonical = match resolve_type(schema, item_type) {
+        Some(t) => t,
+        None => return false,
+    };
+    schema
+        .page_types
+        .get(canonical)
+        .map(|def| !def.allowed_statuses.is_empty() && def.allowed_statuses.iter().any(|s| s == status))
+        .unwrap_or(false)
 }
 
 const VALID_PRIORITIES: &[&str] = &["high", "medium", "low"];
@@ -287,6 +293,18 @@ fn cmd_sync(graph_dir: &str) -> Result<()> {
         "graph_dir": graph_dir,
     }));
 
+    // Contract failure: SchemaLoadFailed (R9)
+    // load_and_validate emits cross-module project_schema events on error.
+    let schema = match load_and_validate(Path::new("."), Path::new(EVENTS_FILE), &correlation_id) {
+        Some(s) => s,
+        None => {
+            emit_event("SyncFailedSchemaInvalid", &correlation_id, json!({
+                "failure_reason": "schema_load_failed",
+            }));
+            return Ok(());
+        }
+    };
+
     // Contract failure: GraphNotAccessible
     let pages_dir = PathBuf::from(graph_dir).join("pages");
     if fs::read_dir(&pages_dir).is_err() {
@@ -333,8 +351,7 @@ fn cmd_sync(graph_dir: &str) -> Result<()> {
         if let Some(ref ls) = logseq_status {
             if Some(ls.as_str()) != eff_status.as_deref() {
                 any_difference = true;
-                let valid = valid_statuses_for_type(&item.item_type);
-                if !valid.contains(&ls.as_str()) {
+                if !vocabulary_allows_status(&schema, &item.item_type, ls.as_str()) {
                     eprintln!(
                         "Skipping {}: '{}' is not valid for type '{}'",
                         &item.item_id[..8.min(item.item_id.len())], ls, item.item_type
