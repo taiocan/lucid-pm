@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use project_schema::{emit_type_unknown, load_and_validate, resolve_type, ProjectSchema};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -24,6 +25,7 @@ struct Cli {
 }
 
 struct ItemRecord {
+    item_id: String,
     item_type: String,
     description: String,
     session_id: String,
@@ -192,7 +194,7 @@ fn build_items(events: &[Value]) -> Vec<ItemRecord> {
             .into_iter()
             .map(|(id, ty, desc)| {
                 let (status, priority) = effective_status_priority(events, &id);
-                ItemRecord { item_type: ty, description: desc,
+                ItemRecord { item_id: id, item_type: ty, description: desc,
                              session_id: sid.clone(), status, priority }
             })
     }).collect()
@@ -205,22 +207,27 @@ fn md_table_row(cols: &[&str]) -> String {
     format!("| {} |", cols.join(" | "))
 }
 
-fn report_full(items: &[ItemRecord], now_ms: u64) -> (String, usize) {
-    let mut by_type: HashMap<&str, Vec<&ItemRecord>> = HashMap::new();
+fn report_full(items: &[ItemRecord], schema: &ProjectSchema, now_ms: u64) -> (String, usize) {
+    // Group by canonical type; items are pre-filtered so resolve_type always succeeds.
+    let mut by_type: HashMap<String, Vec<&ItemRecord>> = HashMap::new();
     for item in items {
-        by_type.entry(item.item_type.as_str()).or_default().push(item);
+        let ct = resolve_type(schema, &item.item_type).unwrap_or(item.item_type.as_str());
+        by_type.entry(ct.to_string()).or_default().push(item);
     }
+
+    // Sort canonical types for consistent section ordering (HP4: empty sections omitted).
+    let mut canonical_types: Vec<&String> = by_type.keys().collect();
+    canonical_types.sort();
 
     let mut out = format!("# Full Project Report\nGenerated: {}\n\n", format_date(now_ms));
     out += "## Summary\n\n";
     out += "| Type | Count |\n|---|---|\n";
-    for t in &["task", "milestone", "risk", "issue", "stakeholder"] {
-        let n = by_type.get(t).map_or(0, |v| v.len());
-        out += &format!("| {} | {} |\n", t, n);
+    for t in &canonical_types {
+        out += &format!("| {} | {} |\n", t, by_type[*t].len());
     }
 
-    for t in &["task", "milestone", "risk", "issue", "stakeholder"] {
-        let Some(group) = by_type.get(t) else { continue };
+    for t in &canonical_types {
+        let group = &by_type[*t];
         out += &format!("\n## {}s\n\n", capitalize(t));
         out += "| Priority | Status | Description |\n|---|---|---|\n";
         for item in group.iter() {
@@ -250,8 +257,13 @@ fn report_full(items: &[ItemRecord], now_ms: u64) -> (String, usize) {
     (out, items.len())
 }
 
-fn report_risk_register(items: &[ItemRecord], now_ms: u64) -> (String, usize) {
-    let risks: Vec<&ItemRecord> = items.iter().filter(|i| i.item_type == "risk").collect();
+fn report_risk_register(items: &[ItemRecord], schema: &ProjectSchema, now_ms: u64) -> (String, usize) {
+    // Resolve "risk" through the schema so the comparison uses the actual canonical name,
+    // regardless of how the schema author chose to capitalise it.
+    let target = resolve_type(schema, "risk");
+    let risks: Vec<&ItemRecord> = items.iter()
+        .filter(|i| target.is_some() && resolve_type(schema, &i.item_type) == target)
+        .collect();
     let mut out = format!("# Risk Register\nGenerated: {}\n\n", format_date(now_ms));
     out += "| Priority | Status | Description |\n|---|---|---|\n";
     for item in &risks {
@@ -266,9 +278,11 @@ fn report_risk_register(items: &[ItemRecord], now_ms: u64) -> (String, usize) {
     (out, risks.len())
 }
 
-fn report_stakeholders(items: &[ItemRecord], now_ms: u64) -> (String, usize) {
+fn report_stakeholders(items: &[ItemRecord], schema: &ProjectSchema, now_ms: u64) -> (String, usize) {
+    let target = resolve_type(schema, "stakeholder");
     let stakeholders: Vec<&ItemRecord> = items.iter()
-        .filter(|i| i.item_type == "stakeholder").collect();
+        .filter(|i| target.is_some() && resolve_type(schema, &i.item_type) == target)
+        .collect();
     let mut out = format!("# Stakeholder Map\nGenerated: {}\n\n", format_date(now_ms));
     out += "| Status | Name |\n|---|---|\n";
     for item in &stakeholders {
@@ -282,19 +296,29 @@ fn report_stakeholders(items: &[ItemRecord], now_ms: u64) -> (String, usize) {
     (out, stakeholders.len())
 }
 
-fn report_weekly(items: &[ItemRecord], events: &[Value], now_ms: u64) -> (String, usize) {
+fn report_weekly(items: &[ItemRecord], events: &[Value], schema: &ProjectSchema, now_ms: u64) -> (String, usize) {
     let week_start_ms = now_ms.saturating_sub(SEVEN_DAYS_MS);
 
+    // Resolve target type names through the schema so comparisons use actual
+    // canonical names regardless of how the schema author capitalised them.
+    let task_canonical = resolve_type(schema, "task");
+    let risk_canonical = resolve_type(schema, "risk");
+    let milestone_canonical = resolve_type(schema, "milestone");
+
     let open_tasks: Vec<&ItemRecord> = items.iter()
-        .filter(|i| i.item_type == "task"
+        .filter(|i| task_canonical.is_some()
+            && resolve_type(schema, &i.item_type) == task_canonical
             && !matches!(i.status.as_deref(), Some("done") | Some("cancelled")))
         .collect();
     let open_risks: Vec<&ItemRecord> = items.iter()
-        .filter(|i| i.item_type == "risk"
+        .filter(|i| risk_canonical.is_some()
+            && resolve_type(schema, &i.item_type) == risk_canonical
             && !matches!(i.status.as_deref(), Some("mitigated") | Some("accepted") | Some("closed")))
         .collect();
     let milestones: Vec<&ItemRecord> = items.iter()
-        .filter(|i| i.item_type == "milestone").collect();
+        .filter(|i| milestone_canonical.is_some()
+            && resolve_type(schema, &i.item_type) == milestone_canonical)
+        .collect();
 
     let recent_sessions: Vec<(String, usize)> = events.iter()
         .filter(|e| {
@@ -377,6 +401,13 @@ fn cmd_report(report_type: &str, graph_path: Option<&str>) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
     let now_ms = timestamp_ms();
 
+    // Vocabulary loading gate: occurs before ReportRequested.
+    // On parse/validation failure, project_schema emits the error event and we exit.
+    let schema = match load_and_validate(Path::new("."), Path::new(EVENTS_FILE), &correlation_id) {
+        Some(s) => s,
+        None    => return Ok(()),
+    };
+
     emit_event("ReportRequested", &correlation_id, json!({
         "report_type": report_type,
         "graph_path":  graph_path,
@@ -395,7 +426,7 @@ fn cmd_report(report_type: &str, graph_path: Option<&str>) -> Result<()> {
     let events = read_events()?;
     let items  = build_items(&events);
 
-    // Contract failure: EmptyRecord
+    // Contract failure: EmptyRecord — fires before any vocabulary exclusion is applied.
     if items.is_empty() {
         eprintln!("No items in project record.");
         emit_event("ReportFailedEmptyRecord", &correlation_id, json!({
@@ -416,11 +447,28 @@ fn cmd_report(report_type: &str, graph_path: Option<&str>) -> Result<()> {
         }
     }
 
+    // Exclude items with unrecognized entity types (HP3/HP4/HP5).
+    // emit_type_unknown (source_module: "project_schema") emitted per excluded item.
+    let recognized_items: Vec<ItemRecord> = items.into_iter()
+        .filter_map(|item| {
+            if resolve_type(&schema, &item.item_type).is_none() {
+                emit_type_unknown(
+                    Path::new(EVENTS_FILE),
+                    &item.item_id,
+                    &item.item_type,
+                    &correlation_id,
+                );
+                return None;
+            }
+            Some(item)
+        })
+        .collect();
+
     let (content, item_count) = match report_type {
-        "full"          => report_full(&items, now_ms),
-        "risk-register" => report_risk_register(&items, now_ms),
-        "stakeholders"  => report_stakeholders(&items, now_ms),
-        "weekly"        => report_weekly(&items, &events, now_ms),
+        "full"          => report_full(&recognized_items, &schema, now_ms),
+        "risk-register" => report_risk_register(&recognized_items, &schema, now_ms),
+        "stakeholders"  => report_stakeholders(&recognized_items, &schema, now_ms),
+        "weekly"        => report_weekly(&recognized_items, &events, &schema, now_ms),
         _               => unreachable!(),
     };
 

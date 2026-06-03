@@ -1,0 +1,1 @@
+{"event_id":"re-inv-0001","event_type":"SchemaParseError","timestamp":1748200001000,"correlation_id":"re-inv-corr-0001","source_module":"project_schema","payload":{"failure_reason":"schema_parse_error","detail":"yaml scanner error: did not find expected <document start>"}}
