@@ -34,9 +34,14 @@ const VALID_EVENT_TYPES: &[&str] = &[
     "RecordQueried",
     "RecordReturned",
     "RecordQueryFailedEmpty",
+    "RecordQueryFailedSchemaInvalid",  // R10: schema load failure
 ];
 
-const VALID_ITEM_TYPES: &[&str] = &["task", "milestone", "risk", "issue", "stakeholder"];
+// Canonical names (R10 and later) + legacy lowercase aliases (pre-R10 fixtures).
+const VALID_ITEM_TYPES: &[&str] = &[
+    "Task", "Milestone", "Risk", "Issue", "Stakeholder", "WorkPackage",
+    "task", "milestone", "risk", "issue", "stakeholder", "workpackage",
+];
 
 // ── Schema conformance ────────────────────────────────────────────────────────
 

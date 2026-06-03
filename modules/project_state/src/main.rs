@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use project_schema::{emit_type_unknown, load_and_validate, resolve_type};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -196,6 +198,18 @@ fn cmd_view() -> Result<()> {
 
     emit_event("RecordQueried", &correlation_id, json!({}));
 
+    // Contract failure: SchemaLoadFailed (R10)
+    // load_and_validate emits cross-module project_schema events on error.
+    let schema = match load_and_validate(Path::new("."), Path::new(EVENTS_FILE), &correlation_id) {
+        Some(s) => s,
+        None => {
+            emit_event("RecordQueryFailedSchemaInvalid", &correlation_id, json!({
+                "failure_reason": "schema_load_failed",
+            }));
+            return Ok(());
+        }
+    };
+
     let sessions = read_incorporated_sessions()?;
 
     // Contract failure: EmptyRecord
@@ -214,28 +228,42 @@ fn cmd_view() -> Result<()> {
     }
 
     let session_count = sessions.len();
+    // total_count = total items in the project record (pre-exclusion); unchanged semantics.
     let total_count = all_items.len() as u64;
+
+    // Concept Dependency: resolve each item's stored type to its vocabulary concept.
+    // Unrecognized types produce SchemaTypeUnknown (via project_schema library) and are
+    // excluded. Recognized types are displayed using the canonical name.
+    let mut recognized: Vec<(&RecordedItem, &str)> = Vec::new();
+    for item in &all_items {
+        match resolve_type(&schema, &item.item_type) {
+            Some(canonical) => recognized.push((item, canonical)),
+            None => emit_type_unknown(
+                Path::new(EVENTS_FILE), &item.item_id, &item.item_type, &correlation_id,
+            ),
+        }
+    }
 
     println!("\n=== Project Record ({} items across {} session(s)) ===\n",
         total_count, session_count);
 
     let mut current_session = String::new();
-    for item in &all_items {
+    for (item, canonical) in &recognized {
         if item.session_id != current_session {
             current_session = item.session_id.clone();
             println!("── Session: {} ──", &current_session[..8.min(current_session.len())]);
         }
         let uncertainty_marker = if item.uncertain { " [UNCERTAIN]" } else { "" };
-        println!("  [{}]{} {}", item.item_type.to_uppercase(), uncertainty_marker, item.description);
+        println!("  [{}]{} {}", canonical.to_uppercase(), uncertainty_marker, item.description);
         if let Some(reason) = &item.uncertainty_reason {
             println!("    Uncertainty: {}", reason);
         }
     }
     println!();
 
-    let items_payload: Vec<Value> = all_items.iter().map(|i| json!({
+    let items_payload: Vec<Value> = recognized.iter().map(|(i, canonical)| json!({
         "item_id": i.item_id,
-        "item_type": i.item_type,
+        "item_type": canonical,   // canonical name, not stored representation
         "description": i.description,
         "uncertain": i.uncertain,
         "uncertainty_reason": i.uncertainty_reason,
@@ -244,7 +272,7 @@ fn cmd_view() -> Result<()> {
 
     emit_event("RecordReturned", &correlation_id, json!({
         "items": items_payload,
-        "total_count": total_count,
+        "total_count": total_count,  // total in record (pre-exclusion)
         "session_count": session_count,
     }));
 
