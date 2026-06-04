@@ -31,6 +31,8 @@ const VALID_OS_EVENT_TYPES: &[&str] = &[
     "OntologyReviewProposed",
     "OntologyReviewFailedEmptyRecord",
     "OntologyReviewFailedLLMUnavailable",
+    "OntologyReviewFailedSchemaInvalid",     // R11
+    "OntologyReviewFailedNoRecognizedItems", // R11
     "OntologyConfirmRequested",
     "OntologyReviewConfirmed",
     "OntologyConfirmFailedReviewNotFound",
@@ -273,19 +275,20 @@ fn test_happy_path_review_proposed_payload_shape() {
         .unwrap();
     let p = &proposed["payload"];
 
-    assert!(
-        p["review_id"].as_str().is_some(),
-        "review_id must be a string"
-    );
-    assert!(
-        p["proposal_count"].as_u64().is_some(),
-        "proposal_count must be a u64"
-    );
+    assert!(p["review_id"].as_str().is_some(), "review_id must be a string");
+    assert!(p["generated_count"].as_u64().is_some(), "generated_count must be a u64");
+    assert!(p["proposal_count"].as_u64().is_some(), "proposal_count must be a u64");
+    assert!(p["rejected_count"].as_u64().is_some(), "rejected_count must be a u64");
     assert!(p["proposals"].is_array(), "proposals must be an array");
     assert_eq!(
         p["proposal_count"].as_u64().unwrap() as usize,
         p["proposals"].as_array().unwrap().len(),
         "proposal_count must equal proposals array length"
+    );
+    assert_eq!(
+        p["generated_count"].as_u64().unwrap(),
+        p["proposal_count"].as_u64().unwrap() + p["rejected_count"].as_u64().unwrap(),
+        "generated_count must equal proposal_count + rejected_count"
     );
 }
 

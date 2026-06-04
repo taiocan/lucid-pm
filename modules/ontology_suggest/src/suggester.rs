@@ -4,7 +4,7 @@ use serde_json::Value;
 const GEMINI_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
-const SYSTEM_PROMPT: &str = r#"You are a project ontology analyst. Given a snapshot of a project record, identify enrichment opportunities.
+const PROMPT_PREFIX: &str = r#"You are a project ontology analyst. Given a snapshot of a project record, identify enrichment opportunities.
 
 Return ONLY a JSON object with a "proposals" array. Each proposal must have:
 - "proposal_id": unique string like "p-001", "p-002", etc.
@@ -14,7 +14,7 @@ Return ONLY a JSON object with a "proposals" array. Each proposal must have:
 For type "link", also include:
 - "source_id": exact UUID of the source item
 - "source_type": item type of the source item
-- "link_type": one of "blocks", "affects", "assigned_to", "mitigated_by", "escalates_to", "related_to"
+- "link_type": the relation type name
 - "target_id": exact UUID of the target item
 - "target_type": item type of the target item
 
@@ -26,8 +26,9 @@ For type "status", also include:
 For type "priority", also include:
 - "item_id": exact UUID of the item
 - "current_priority": current priority string or null
-- "proposed_priority": one of "high", "medium", "low"
+- "proposed_priority": one of "high", "medium", "low""#;
 
+const PROMPT_HARDCODED_CONSTRAINTS: &str = r#"
 Only propose links that follow these valid type pairs:
 - blocks: (task|issue) -> (task|milestone)
 - affects: (risk|issue) -> (task|milestone|stakeholder)
@@ -41,8 +42,9 @@ Only propose statuses valid for each item type:
 - milestone: pending, achieved, missed
 - risk: open, mitigated, accepted, closed
 - issue: open, in_progress, resolved, closed
-- stakeholder: active, inactive
+- stakeholder: active, inactive"#;
 
+const PROMPT_SUFFIX: &str = r#"
 Do not propose links that already exist. Do not propose setting a status or priority to its current value.
 If there are no enrichment opportunities, return {"proposals": []}.
 Return only valid JSON. No markdown, no explanation outside the JSON."#;
@@ -53,13 +55,21 @@ fn gemini_api_key() -> Result<String> {
         .context("GEMINI_API_KEY_PMCLI or GEMINI_API_KEY must be set")
 }
 
-pub async fn suggest_proposals(snapshot: &str) -> Result<Vec<Value>> {
+/// Generate enrichment proposals for `snapshot`.
+///
+/// `vocab_constraints` — when Some, replaces the hardcoded type/status
+/// constraint block in the prompt with vocabulary-derived constraints.
+/// When None, the hardcoded defaults are used (pre-R11 behaviour).
+pub async fn suggest_proposals(snapshot: &str, vocab_constraints: Option<&str>) -> Result<Vec<Value>> {
+    let constraints = vocab_constraints.unwrap_or(PROMPT_HARDCODED_CONSTRAINTS);
+    let system_prompt = format!("{}\n{}\n{}", PROMPT_PREFIX, constraints, PROMPT_SUFFIX);
+
     let api_key = gemini_api_key()?;
     let url = format!("{}?key={}", GEMINI_URL, api_key);
 
     let body = serde_json::json!({
         "systemInstruction": {
-            "parts": [{ "text": SYSTEM_PROMPT }]
+            "parts": [{ "text": system_prompt }]
         },
         "contents": [{
             "role": "user",

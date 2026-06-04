@@ -131,6 +131,25 @@ fn run_binary_no_llm_key(dir: &TempDir, args: &[&str]) -> std::process::Output {
         .expect("Failed to run binary")
 }
 
+/// Like run_binary_no_llm_key but sets HOME=dir.path() so the binary cannot
+/// find ~/.lucidpm/default-schema.yaml. Required for R11 tests that write a
+/// project-schema.yaml and need to control the vocabulary precisely — without
+/// isolation the default schema merges in and causes alias collisions with
+/// test schemas that use lowercase canonical names.
+fn run_binary_schema_isolated(dir: &TempDir, args: &[&str]) -> std::process::Output {
+    Command::new(binary_path())
+        .current_dir(dir.path())
+        .args(args)
+        .env("HOME", dir.path())
+        .env_remove("GEMINI_API_KEY_PMCLI")
+        .env_remove("GEMINI_API_KEY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("Failed to run binary")
+}
+
 fn read_all_events(dir: &TempDir) -> Vec<Value> {
     let path = dir.path().join("events/runtime_events.jsonl");
     if !path.exists() {
@@ -224,18 +243,22 @@ fn test_empty_record_emits_failed_empty_record() {
         .map(|e| e["event_type"].as_str().unwrap())
         .collect();
 
+    // R11: OntologyReviewRequested is now always emitted first (corrected ordering)
+    assert!(
+        types.contains(&"OntologyReviewRequested"),
+        "OntologyReviewRequested must be emitted before the empty record failure"
+    );
     assert!(
         types.contains(&"OntologyReviewFailedEmptyRecord"),
         "OntologyReviewFailedEmptyRecord must be emitted"
     );
     assert!(
-        !types.contains(&"OntologyReviewRequested"),
-        "OntologyReviewRequested must NOT be emitted when record is empty"
-    );
-    assert!(
         !types.contains(&"OntologyReviewProposed"),
         "OntologyReviewProposed must NOT be emitted"
     );
+    let req_pos = types.iter().position(|&t| t == "OntologyReviewRequested").unwrap();
+    let fail_pos = types.iter().position(|&t| t == "OntologyReviewFailedEmptyRecord").unwrap();
+    assert!(req_pos < fail_pos, "OntologyReviewRequested must precede OntologyReviewFailedEmptyRecord");
 }
 
 #[test]
@@ -1092,4 +1115,721 @@ fn test_accept_all_populates_confirm_requested_accepted_ids() {
     );
     assert!(accepted_ids.contains(&serde_json::json!("p-001")));
     assert!(accepted_ids.contains(&serde_json::json!("p-002")));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// R11: Schema-Driven Proposals — behavioral tests
+// Covers: SchemaLoadFailed, NoRecognizedItems, item eligibility filtering,
+// alias/canonical equivalence, HP2 (no-schema backward compat), and
+// invariant falsification scenarios from the R11 contract.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The default vocabulary: exactly matches the hardcoded fallback tables.
+/// Used as the backward-compatibility baseline (Stage 5 rule: DEFAULT_SCHEMA
+/// must exactly match the previously hardcoded table).
+const DEFAULT_SCHEMA: &str = r#"schemaVersion: 1
+statuses:
+  todo: ~
+  doing: ~
+  done: ~
+  waiting: ~
+  cancelled: ~
+  pending: ~
+  achieved: ~
+  missed: ~
+  open: ~
+  mitigated: ~
+  accepted: ~
+  closed: ~
+  in_progress: ~
+  resolved: ~
+  active: ~
+  inactive: ~
+pageTypes:
+  task:
+    allowedStatuses: [todo, doing, done, waiting, cancelled]
+  milestone:
+    allowedStatuses: [pending, achieved, missed]
+  risk:
+    allowedStatuses: [open, mitigated, accepted, closed]
+  issue:
+    allowedStatuses: [open, in_progress, resolved, closed]
+  stakeholder:
+    allowedStatuses: [active, inactive]
+relations:
+  blocks:
+    source: [task, issue]
+    target: [task, milestone]
+  affects:
+    source: [risk, issue]
+    target: [task, milestone, stakeholder]
+  assigned_to:
+    source: [task, issue]
+    target: [stakeholder]
+  mitigated_by:
+    source: [risk]
+    target: [task]
+  escalates_to:
+    source: [risk, issue]
+    target: [stakeholder]
+  related_to:
+    source: []
+    target: []
+"#;
+
+fn setup_temp_dir_with_schema(schema_yaml: &str) -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("events")).unwrap();
+    fs::write(dir.path().join("project-schema.yaml"), schema_yaml).unwrap();
+    dir
+}
+
+fn write_broken_schema(dir: &TempDir) {
+    // Valid YAML but structurally invalid for project_schema (unknown key that
+    // triggers a parse error is not enough; we use invalid YAML syntax instead).
+    fs::write(
+        dir.path().join("project-schema.yaml"),
+        "pageTypes: [this is not a mapping but a sequence which fails deserialization]",
+    )
+    .unwrap();
+}
+
+// ── Failure Path: SchemaLoadFailed ────────────────────────────────────────────
+
+#[test]
+fn test_schema_load_failed_emits_schema_invalid_after_requested() {
+    let dir = setup_temp_dir_with_schema(DEFAULT_SCHEMA);
+    seed_full_record(&dir);
+    write_broken_schema(&dir); // overwrite valid schema with broken one
+
+    run_binary_no_llm_key(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(
+        types.contains(&"OntologyReviewRequested"),
+        "OntologyReviewRequested must be emitted before SchemaLoadFailed"
+    );
+    assert!(
+        types.contains(&"OntologyReviewFailedSchemaInvalid"),
+        "OntologyReviewFailedSchemaInvalid must be emitted when schema is broken"
+    );
+    let req_pos = types.iter().position(|&t| t == "OntologyReviewRequested").unwrap();
+    let fail_pos = types.iter().position(|&t| t == "OntologyReviewFailedSchemaInvalid").unwrap();
+    assert!(req_pos < fail_pos, "OntologyReviewRequested must precede OntologyReviewFailedSchemaInvalid");
+}
+
+#[test]
+fn test_schema_load_failed_is_terminal_no_subsequent_events() {
+    let dir = setup_temp_dir_with_schema(DEFAULT_SCHEMA);
+    seed_full_record(&dir);
+    write_broken_schema(&dir);
+
+    run_binary_no_llm_key(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(
+        !types.contains(&"OntologyReviewProposed"),
+        "OntologyReviewProposed must NOT be emitted after SchemaLoadFailed"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedLLMUnavailable"),
+        "OntologyReviewFailedLLMUnavailable must NOT be emitted after SchemaLoadFailed"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedEmptyRecord"),
+        "OntologyReviewFailedEmptyRecord must NOT be emitted alongside SchemaLoadFailed"
+    );
+}
+
+#[test]
+fn test_schema_load_failed_payload() {
+    let dir = setup_temp_dir_with_schema(DEFAULT_SCHEMA);
+    seed_full_record(&dir);
+    write_broken_schema(&dir);
+
+    run_binary_no_llm_key(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let failure = events
+        .iter()
+        .find(|e| e["event_type"] == "OntologyReviewFailedSchemaInvalid")
+        .unwrap();
+    let p = &failure["payload"];
+    assert_eq!(p["failure_reason"].as_str().unwrap(), "schema_invalid");
+    assert!(p["error_detail"].as_str().is_some(), "error_detail must be present");
+    assert!(!p["error_detail"].as_str().unwrap().is_empty(), "error_detail must be non-empty");
+}
+
+// ── Failure Path: NoRecognizedItems ──────────────────────────────────────────
+
+#[test]
+fn test_no_recognized_items_emits_correct_failure() {
+    // Schema recognizes only "task"; record has only "Incident" items (unrecognized)
+    let schema = r#"schemaVersion: 1
+statuses:
+  open: ~
+pageTypes:
+  task:
+    allowedStatuses: [open]
+relations: {}
+"#;
+    let dir = setup_temp_dir_with_schema(schema);
+    seed_incorporated_items(
+        &dir,
+        SESSION_A,
+        &[
+            ("inc-001", "Incident", "Some unrecognized item"),
+            ("inc-002", "Incident", "Another unrecognized item"),
+        ],
+    );
+
+    run_binary_schema_isolated(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(
+        types.contains(&"OntologyReviewFailedNoRecognizedItems"),
+        "OntologyReviewFailedNoRecognizedItems must be emitted when all items are unrecognized"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedEmptyRecord"),
+        "OntologyReviewFailedEmptyRecord must NOT be emitted when items exist but are unrecognized"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewProposed"),
+        "OntologyReviewProposed must NOT be emitted when no recognized items exist"
+    );
+}
+
+#[test]
+fn test_no_recognized_items_payload() {
+    let schema = r#"schemaVersion: 1
+statuses:
+  open: ~
+pageTypes:
+  task:
+    allowedStatuses: [open]
+relations: {}
+"#;
+    let dir = setup_temp_dir_with_schema(schema);
+    seed_incorporated_items(
+        &dir,
+        SESSION_A,
+        &[("inc-001", "Incident", "unrecognized"), ("inc-002", "Incident", "unrecognized 2")],
+    );
+
+    run_binary_schema_isolated(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let failure = events
+        .iter()
+        .find(|e| e["event_type"] == "OntologyReviewFailedNoRecognizedItems")
+        .unwrap();
+    let p = &failure["payload"];
+    assert_eq!(p["failure_reason"].as_str().unwrap(), "no_recognized_items");
+    let item_count = p["item_count"].as_u64().unwrap();
+    assert!(item_count >= 1, "item_count must be ≥ 1 (record had 2 items)");
+    assert_eq!(item_count, 2, "item_count must equal total record size including unrecognized items");
+}
+
+#[test]
+fn test_review_requested_emitted_before_no_recognized_items() {
+    let schema = r#"schemaVersion: 1
+statuses:
+  open: ~
+pageTypes:
+  task:
+    allowedStatuses: [open]
+relations: {}
+"#;
+    let dir = setup_temp_dir_with_schema(schema);
+    seed_incorporated_items(&dir, SESSION_A, &[("inc-001", "Incident", "unrecognized")]);
+
+    run_binary_schema_isolated(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    let req_pos = types.iter().position(|&t| t == "OntologyReviewRequested").unwrap();
+    let fail_pos = types.iter().position(|&t| t == "OntologyReviewFailedNoRecognizedItems").unwrap();
+    assert!(req_pos < fail_pos, "OntologyReviewRequested must precede OntologyReviewFailedNoRecognizedItems");
+}
+
+// ── Happy Path: recognized items with schema reach LLM ───────────────────────
+
+#[test]
+fn test_recognized_items_with_schema_reach_llm() {
+    // All items recognized by vocabulary → passes filter → reaches LLM → LLMUnavailable
+    let dir = setup_temp_dir_with_schema(DEFAULT_SCHEMA);
+    seed_full_record(&dir);
+
+    run_binary_schema_isolated(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(
+        types.contains(&"OntologyReviewFailedLLMUnavailable"),
+        "Items recognized by schema must pass filter and reach LLM call"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedNoRecognizedItems"),
+        "NoRecognizedItems must NOT fire when items are recognized"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedSchemaInvalid"),
+        "SchemaInvalid must NOT fire for a valid schema"
+    );
+}
+
+// ── Backward-compatibility regression test ────────────────────────────────────
+
+#[test]
+fn test_default_schema_matches_legacy_behavior() {
+    // DEFAULT_SCHEMA exactly reproduces the pre-R11 hardcoded vocabulary.
+    // Items of all previously-recognized types must remain recognized.
+    let dir = setup_temp_dir_with_schema(DEFAULT_SCHEMA);
+    seed_full_record(&dir); // task, milestone, risk, stakeholder, issue
+
+    run_binary_schema_isolated(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    // Must reach LLM — all five item types are recognized by the default vocabulary
+    assert!(
+        types.contains(&"OntologyReviewFailedLLMUnavailable"),
+        "Default vocabulary must recognize all legacy item types (task, milestone, risk, stakeholder, issue)"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedNoRecognizedItems"),
+        "Default vocabulary must not cause NoRecognizedItems for legacy item types"
+    );
+}
+
+#[test]
+fn test_no_schema_does_not_cause_additional_exclusions() {
+    // No project-schema.yaml → SchemaNotFound → hardcoded fallback → items recognized
+    let dir = setup_temp_dir(); // deliberately no schema written
+    seed_full_record(&dir);
+
+    run_binary_no_llm_key(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(
+        types.contains(&"OntologyReviewFailedLLMUnavailable"),
+        "No-schema path must not exclude items — hardcoded fallback applies"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedNoRecognizedItems"),
+        "No-schema path must not emit NoRecognizedItems"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedSchemaInvalid"),
+        "SchemaNotFound must not trigger SchemaInvalid"
+    );
+}
+
+// ── Invariant Falsification tests ─────────────────────────────────────────────
+
+// IFS row: "No unrecognized item appears in any proposal"
+#[test]
+fn test_unrecognized_item_excluded_falsifies_input_only_filtering() {
+    // Vocabulary recognizes only "task"; record has only "Incident" items →
+    // no recognized items → NoRecognizedItems (not LLMUnavailable).
+    // Wrong assumption: all items are fed to analysis; proposals for Incident generated.
+    let schema = r#"schemaVersion: 1
+statuses:
+  open: ~
+pageTypes:
+  task:
+    allowedStatuses: [open]
+relations: {}
+"#;
+    let dir = setup_temp_dir_with_schema(schema);
+    seed_incorporated_items(&dir, SESSION_A, &[("inc-001", "Incident", "unrecognized")]);
+
+    run_binary_schema_isolated(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(
+        types.contains(&"OntologyReviewFailedNoRecognizedItems"),
+        "Unrecognized-only record must emit NoRecognizedItems, not proceed to LLM"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedLLMUnavailable"),
+        "LLM must not be called when no recognized items exist"
+    );
+}
+
+// IFS row: "Unrecognized items don't block recognized items"
+#[test]
+fn test_unrecognized_items_dont_block_recognized_falsifies_abort_on_unknown() {
+    // Vocabulary recognizes "task" but not "Incident".
+    // Record has one recognized "task" item and one unrecognized "Incident" item.
+    // Correct: analysis proceeds (LLMUnavailable). Wrong: first unrecognized aborts.
+    let schema = r#"schemaVersion: 1
+statuses:
+  open: ~
+  todo: ~
+pageTypes:
+  task:
+    allowedStatuses: [todo]
+relations: {}
+"#;
+    let dir = setup_temp_dir_with_schema(schema);
+    seed_incorporated_items(
+        &dir,
+        SESSION_A,
+        &[
+            (ITEM_TASK, "task", "recognized item"),
+            ("inc-001", "Incident", "unrecognized item"),
+        ],
+    );
+
+    run_binary_schema_isolated(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(
+        types.contains(&"OntologyReviewFailedLLMUnavailable"),
+        "Analysis must proceed for recognized items even when unrecognized items are present"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedNoRecognizedItems"),
+        "NoRecognizedItems must NOT fire when at least one recognized item exists"
+    );
+}
+
+// IFS row: "Vocabulary validation per-proposal, not batch-invalidating"
+#[test]
+fn test_per_proposal_validation_not_batch_invalidating_falsifies_batch_rejection() {
+    // Confirm two proposals: one valid (status for existing item), one referencing
+    // a non-existent item. Correct: valid applied, invalid skipped.
+    // Wrong: first invalid causes the entire batch to be discarded.
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+    let proposals = vec![
+        status_proposal("p-001", ITEM_TASK, "doing"),           // valid
+        status_proposal("p-002", "nonexistent-id-xxxx", "done"), // invalid: item not in record
+    ];
+    seed_review_proposed(&dir, REVIEW_ID_1, proposals);
+
+    run_binary(&dir, &["confirm", REVIEW_ID_1, "--accept", "p-001", "--accept", "p-002"]);
+
+    let events = read_os_events(&dir);
+    let confirmed = events.iter().find(|e| e["event_type"] == "OntologyReviewConfirmed").unwrap();
+    let p = &confirmed["payload"];
+
+    assert_eq!(p["accepted_count"].as_u64().unwrap(), 1, "valid proposal must be applied");
+    assert_eq!(p["skipped_count"].as_u64().unwrap(), 1, "invalid proposal must be skipped individually");
+    assert_eq!(p["rejected_count"].as_u64().unwrap(), 0);
+    assert!(p["accepted_ids"].as_array().unwrap().contains(&json!("p-001")));
+    assert!(p["skipped_ids"].as_array().unwrap().contains(&json!("p-002")));
+}
+
+// IFS row: "Zero proposals after filtering = success"
+#[test]
+fn test_zero_proposals_is_success_not_failure_falsifies_empty_result_as_error() {
+    // Confirming a review with zero proposals produces OntologyReviewConfirmed,
+    // not a failure event. Validates the BS2 observable: empty proposal_count = success.
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+    seed_review_proposed(&dir, REVIEW_ID_1, vec![]); // zero proposals
+
+    run_binary(&dir, &["confirm", REVIEW_ID_1]);
+
+    let events = read_os_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(
+        types.contains(&"OntologyReviewConfirmed"),
+        "Zero proposals must produce OntologyReviewConfirmed, not a failure event"
+    );
+    assert!(
+        !types.iter().any(|&t| t.contains("Failed")),
+        "No failure event must be emitted when proposal set is empty"
+    );
+    let confirmed = events.iter().find(|e| e["event_type"] == "OntologyReviewConfirmed").unwrap();
+    assert_eq!(confirmed["payload"]["accepted_count"].as_u64().unwrap(), 0);
+    assert_eq!(confirmed["payload"]["skipped_count"].as_u64().unwrap(), 0);
+}
+
+// IFS row: "Concept Dependency — vocabulary identity equivalence (alias)"
+#[test]
+fn test_alias_eligible_same_as_canonical_falsifies_canonical_only_check() {
+    // Schema: canonical "Risk" with alias "hazard".
+    // Record: item stored as "hazard" (alias).
+    // Correct: recognized → passes filter → LLMUnavailable.
+    // Wrong: only canonical "Risk" matched → NoRecognizedItems.
+    let schema = r#"schemaVersion: 1
+statuses:
+  open: ~
+pageTypes:
+  Risk:
+    allowedStatuses: [open]
+    aliases: [hazard]
+relations: {}
+"#;
+    let dir = setup_temp_dir_with_schema(schema);
+    seed_incorporated_items(&dir, SESSION_A, &[("risk-001", "hazard", "alias-stored risk")]);
+
+    run_binary_no_llm_key(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(
+        types.contains(&"OntologyReviewFailedLLMUnavailable"),
+        "Alias-stored item must be recognized and pass the filter"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedNoRecognizedItems"),
+        "NoRecognizedItems must NOT fire for alias-stored items"
+    );
+}
+
+// IFS row: "Concept Dependency — canonical-casing fixture"
+#[test]
+fn test_casing_canonical_and_alias_both_recognized_falsifies_case_sensitive_comparison() {
+    // Schema: canonical "Risk" with alias "risk" (lowercase).
+    // Items stored as "Risk" (canonical) and "risk" (alias) must both be recognized.
+    // Wrong: case-sensitive string comparison → "risk" ≠ "Risk" → one excluded.
+    let schema = r#"schemaVersion: 1
+statuses:
+  open: ~
+pageTypes:
+  Risk:
+    allowedStatuses: [open]
+    aliases: [risk]
+relations: {}
+"#;
+    let dir = setup_temp_dir_with_schema(schema);
+    seed_incorporated_items(
+        &dir,
+        SESSION_A,
+        &[
+            ("item-a", "Risk", "canonical-stored"),
+            ("item-b", "risk", "alias-stored"),
+        ],
+    );
+
+    run_binary_no_llm_key(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(
+        types.contains(&"OntologyReviewFailedLLMUnavailable"),
+        "Both canonical and alias-stored items must be recognized (reach LLM)"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedNoRecognizedItems"),
+        "NoRecognizedItems must NOT fire when at least one item (alias or canonical) is recognized"
+    );
+}
+
+// IFS row: "NoRecognizedItems ≠ EmptyProjectRecord"
+#[test]
+fn test_no_recognized_items_not_empty_record_falsifies_collapsed_condition() {
+    // Record has 3 items, all with unrecognized types.
+    // Correct: OntologyReviewFailedNoRecognizedItems.
+    // Wrong: OntologyReviewFailedEmptyRecord (collapsed condition).
+    let schema = r#"schemaVersion: 1
+statuses:
+  open: ~
+pageTypes:
+  task:
+    allowedStatuses: [open]
+relations: {}
+"#;
+    let dir = setup_temp_dir_with_schema(schema);
+    seed_incorporated_items(
+        &dir,
+        SESSION_A,
+        &[
+            ("inc-001", "Incident", "unrecognized 1"),
+            ("inc-002", "Incident", "unrecognized 2"),
+            ("inc-003", "Incident", "unrecognized 3"),
+        ],
+    );
+
+    run_binary_schema_isolated(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(
+        types.contains(&"OntologyReviewFailedNoRecognizedItems"),
+        "3 unrecognized items must emit NoRecognizedItems, not EmptyProjectRecord"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedEmptyRecord"),
+        "OntologyReviewFailedEmptyRecord must NOT be emitted when the record has items"
+    );
+}
+
+// IFS row: "Schema failure evaluated before record-content checks"
+#[test]
+fn test_schema_failure_before_empty_record_check_falsifies_ordering() {
+    // Broken schema + empty record.
+    // Correct: SchemaInvalid fires first.
+    // Wrong: EmptyProjectRecord fires (record checked before schema).
+    let dir = setup_temp_dir(); // no items
+    write_broken_schema(&dir);  // but broken schema present
+
+    run_binary_no_llm_key(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(
+        types.contains(&"OntologyReviewFailedSchemaInvalid"),
+        "SchemaInvalid must fire before EmptyProjectRecord is checked"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedEmptyRecord"),
+        "EmptyProjectRecord must NOT fire when schema check aborts first"
+    );
+}
+
+// IFS row: "No schema — no additional exclusions"
+#[test]
+fn test_no_schema_no_additional_exclusions_falsifies_default_empty_vocabulary() {
+    // No project-schema.yaml at all → SchemaNotFound → hardcoded fallback.
+    // Items with legacy types must still be recognized.
+    // Wrong: no-schema treated as empty vocabulary → all items excluded → NoRecognizedItems.
+    let dir = setup_temp_dir(); // deliberately no schema
+    seed_full_record(&dir);    // task, milestone, risk, stakeholder, issue
+
+    run_binary_no_llm_key(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(
+        types.contains(&"OntologyReviewFailedLLMUnavailable"),
+        "No-schema must use hardcoded fallback — all legacy types recognized"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedNoRecognizedItems"),
+        "NoRecognizedItems must NOT fire in the no-schema path"
+    );
+    assert!(
+        !types.contains(&"OntologyReviewFailedSchemaInvalid"),
+        "SchemaNotFound must not be treated as SchemaLoadFailed"
+    );
+}
+
+// IFS row: "Failure evaluation is short-circuiting"
+#[test]
+fn test_schema_failure_short_circuits_exactly_one_failure_event_emitted() {
+    // Broken schema. Only one terminal failure event must be emitted.
+    let dir = setup_temp_dir_with_schema(DEFAULT_SCHEMA);
+    seed_full_record(&dir);
+    write_broken_schema(&dir);
+
+    run_binary_no_llm_key(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let failure_events: Vec<&Value> = events
+        .iter()
+        .filter(|e| {
+            e["event_type"]
+                .as_str()
+                .map(|t| t.starts_with("OntologyReviewFailed"))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    assert_eq!(
+        failure_events.len(),
+        1,
+        "Exactly one failure event must be emitted (short-circuit): got {:?}",
+        failure_events
+            .iter()
+            .map(|e| e["event_type"].as_str().unwrap())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        failure_events[0]["event_type"].as_str().unwrap(),
+        "OntologyReviewFailedSchemaInvalid"
+    );
+}
+
+// ── R11 Telemetry: new failure events have required base fields ───────────────
+
+#[test]
+fn test_schema_invalid_event_has_required_base_fields() {
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+    write_broken_schema(&dir);
+
+    run_binary_no_llm_key(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let failure = events
+        .iter()
+        .find(|e| e["event_type"] == "OntologyReviewFailedSchemaInvalid")
+        .unwrap();
+    for field in &["event_id", "event_type", "correlation_id", "source_module"] {
+        assert!(failure[field].as_str().is_some(), "{} must be a non-null string", field);
+    }
+    assert!(failure["timestamp"].as_u64().is_some(), "timestamp must be a u64");
+    assert!(failure["payload"].is_object(), "payload must be an object");
+}
+
+#[test]
+fn test_no_recognized_items_event_has_required_base_fields() {
+    let schema = r#"schemaVersion: 1
+statuses:
+  open: ~
+pageTypes:
+  task:
+    allowedStatuses: [open]
+relations: {}
+"#;
+    let dir = setup_temp_dir_with_schema(schema);
+    seed_incorporated_items(&dir, SESSION_A, &[("inc-001", "Incident", "unrecognized")]);
+
+    run_binary_schema_isolated(&dir, &["propose"]);
+
+    let events = read_os_events(&dir);
+    let failure = events
+        .iter()
+        .find(|e| e["event_type"] == "OntologyReviewFailedNoRecognizedItems")
+        .unwrap();
+    for field in &["event_id", "event_type", "correlation_id", "source_module"] {
+        assert!(failure[field].as_str().is_some(), "{} must be a non-null string", field);
+    }
+    assert!(failure["timestamp"].as_u64().is_some(), "timestamp must be a u64");
+    assert!(failure["payload"].is_object(), "payload must be an object");
+}
+
+// ── R9B: Filtering integrity invariant ────────────────────────────────────────
+
+#[test]
+fn test_confirm_time_skip_is_distinct_from_analysis_time_rejected_count() {
+    // Confirm-time skipped_count (proposals that fail confirm-time validation) is
+    // a separate lifecycle concern from analysis-time rejected_count (proposals
+    // discarded by vocabulary filtering). This test verifies the confirm-path
+    // skipped_count works correctly and is conceptually independent.
+    let dir = setup_temp_dir();
+    seed_full_record(&dir);
+    let proposals = vec![
+        status_proposal("p-001", ITEM_TASK, "doing"),
+        status_proposal("p-002", "nonexistent-id-xxxx", "done"),
+    ];
+    seed_review_proposed(&dir, REVIEW_ID_1, proposals);
+
+    run_binary(&dir, &["confirm", REVIEW_ID_1, "--accept", "p-001", "--accept", "p-002"]);
+
+    let events = read_os_events(&dir);
+    let confirmed = events.iter().find(|e| e["event_type"] == "OntologyReviewConfirmed").unwrap();
+    let p = &confirmed["payload"];
+    assert_eq!(p["accepted_count"].as_u64().unwrap(), 1);
+    assert_eq!(p["skipped_count"].as_u64().unwrap(), 1,
+        "confirm-time skip is independent of analysis-time rejected_count");
+    assert_eq!(p["rejected_count"].as_u64().unwrap(), 0);
 }

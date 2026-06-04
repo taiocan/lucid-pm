@@ -1,5 +1,9 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use project_schema::{
+    emit_schema_failure, is_valid_status, load_schema, resolve_type, validate, ProjectSchema,
+    SchemaError,
+};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -76,7 +80,6 @@ fn read_events() -> Result<Vec<Value>> {
         .collect())
 }
 
-// Returns the session_ids of all incorporated sessions.
 fn incorporated_sessions(events: &[Value]) -> Vec<String> {
     events
         .iter()
@@ -88,7 +91,6 @@ fn incorporated_sessions(events: &[Value]) -> Vec<String> {
         .collect()
 }
 
-// Returns accepted items for a session as (item_id, item_type, description).
 fn items_for_session(events: &[Value], session_id: &str) -> Vec<(String, String, String)> {
     let mut extracted: Option<Vec<Value>> = None;
     let mut accepted: Option<Vec<String>> = None;
@@ -129,7 +131,6 @@ fn items_for_session(events: &[Value], session_id: &str) -> Vec<(String, String,
         .collect()
 }
 
-// Returns item_id -> (item_type, description) for all items in the project record.
 fn build_item_registry(events: &[Value]) -> HashMap<String, (String, String)> {
     let sessions = incorporated_sessions(events);
     let mut registry: HashMap<String, (String, String)> = HashMap::new();
@@ -141,7 +142,6 @@ fn build_item_registry(events: &[Value]) -> HashMap<String, (String, String)> {
     registry
 }
 
-// Returns currently active links as (source_id, link_type, target_id).
 fn build_active_links(events: &[Value]) -> Vec<(String, String, String)> {
     let mut links: Vec<(String, String, String)> = Vec::new();
     for event in events {
@@ -171,8 +171,7 @@ fn build_active_links(events: &[Value]) -> Vec<(String, String, String)> {
 fn current_status(events: &[Value], item_id: &str) -> Option<String> {
     let mut last: Option<String> = None;
     for event in events {
-        let et = event["event_type"].as_str().unwrap_or("");
-        if et == "ItemStatusUpdated" {
+        if event["event_type"].as_str() == Some("ItemStatusUpdated") {
             if event["payload"]["item_id"].as_str() == Some(item_id) {
                 last = event["payload"]["new_status"].as_str().map(|s| s.to_string());
             }
@@ -184,8 +183,7 @@ fn current_status(events: &[Value], item_id: &str) -> Option<String> {
 fn current_priority(events: &[Value], item_id: &str) -> Option<String> {
     let mut last: Option<String> = None;
     for event in events {
-        let et = event["event_type"].as_str().unwrap_or("");
-        if et == "ItemPriorityUpdated" {
+        if event["event_type"].as_str() == Some("ItemPriorityUpdated") {
             if event["payload"]["item_id"].as_str() == Some(item_id) {
                 last = event["payload"]["new_priority"].as_str().map(|s| s.to_string());
             }
@@ -194,7 +192,9 @@ fn current_priority(events: &[Value], item_id: &str) -> Option<String> {
     last
 }
 
-fn is_valid_link_type(link_type: &str, source_type: &str, target_type: &str) -> bool {
+// ─── Hardcoded vocabulary fallback (used when no schema is configured) ────────
+
+fn is_valid_link_type_hardcoded(link_type: &str, source_type: &str, target_type: &str) -> bool {
     match link_type {
         "blocks" => {
             matches!(source_type, "task" | "issue")
@@ -216,7 +216,7 @@ fn is_valid_link_type(link_type: &str, source_type: &str, target_type: &str) -> 
     }
 }
 
-fn valid_statuses(item_type: &str) -> &'static [&'static str] {
+fn valid_statuses_hardcoded(item_type: &str) -> &'static [&'static str] {
     match item_type {
         "task" => &["todo", "doing", "done", "waiting", "cancelled"],
         "milestone" => &["pending", "achieved", "missed"],
@@ -227,7 +227,131 @@ fn valid_statuses(item_type: &str) -> &'static [&'static str] {
     }
 }
 
-// Build a human-readable snapshot of the project record for the LLM.
+// ─── Vocabulary-driven helpers ────────────────────────────────────────────────
+
+/// Check whether `link_type` is valid for the given canonical source and target
+/// types according to the active vocabulary.
+/// Both `canonical_source` and `canonical_target` must already be resolved
+/// canonical names (not aliases).
+fn is_valid_link_type_vocab(
+    schema: &ProjectSchema,
+    link_type: &str,
+    canonical_source: &str,
+    canonical_target: &str,
+) -> bool {
+    if let Some(rel) = schema.relations.get(link_type) {
+        let src_ok = rel.source.is_empty()
+            || rel.source.iter().any(|t| t == canonical_source);
+        let tgt_ok = rel.target.is_empty()
+            || rel.target.iter().any(|t| t == canonical_target);
+        src_ok && tgt_ok
+    } else {
+        false
+    }
+}
+
+/// Returns items whose entity type resolves to a recognized vocabulary concept.
+fn filter_recognized_items(
+    registry: &HashMap<String, (String, String)>,
+    schema: &ProjectSchema,
+) -> HashMap<String, (String, String)> {
+    registry
+        .iter()
+        .filter(|(_, (item_type, _))| resolve_type(schema, item_type).is_some())
+        .map(|(id, val)| (id.clone(), val.clone()))
+        .collect()
+}
+
+/// Build the vocabulary constraint string for the LLM prompt from the active
+/// schema. The returned string replaces the hardcoded constraint block.
+fn build_vocab_context(schema: &ProjectSchema) -> String {
+    let mut s = String::new();
+
+    s.push_str("\nOnly propose links that follow these valid type pairs:\n");
+    let mut relations: Vec<(&String, _)> = schema.relations.iter().collect();
+    relations.sort_by_key(|(n, _)| n.as_str());
+    if relations.is_empty() {
+        s.push_str("(no link types defined in vocabulary)\n");
+    } else {
+        for (name, rel) in &relations {
+            let src = if rel.source.is_empty() {
+                "any".to_string()
+            } else {
+                rel.source.join("|")
+            };
+            let tgt = if rel.target.is_empty() {
+                "any".to_string()
+            } else {
+                rel.target.join("|")
+            };
+            s.push_str(&format!("- {}: ({}) -> ({})\n", name, src, tgt));
+        }
+    }
+
+    s.push_str("\nOnly propose statuses valid for each item type:\n");
+    let mut page_types: Vec<(&String, _)> = schema.page_types.iter().collect();
+    page_types.sort_by_key(|(n, _)| n.as_str());
+    for (type_name, def) in &page_types {
+        let statuses = if def.allowed_statuses.is_empty() {
+            let mut global: Vec<&str> = schema.statuses.keys().map(|s| s.as_str()).collect();
+            global.sort();
+            global.join(", ")
+        } else {
+            def.allowed_statuses.join(", ")
+        };
+        if !statuses.is_empty() {
+            s.push_str(&format!("- {}: {}\n", type_name, statuses));
+        }
+    }
+
+    s
+}
+
+/// Attempt to load and validate the project schema.
+///
+/// Returns:
+///   Ok(Some(schema)) — schema loaded and valid
+///   Ok(None)         — no schema configured (SchemaNotFound); caller uses
+///                      hardcoded fallback (HP2 backward-compatibility)
+///   Err(())          — schema present but invalid; OntologyReviewFailedSchemaInvalid
+///                      and project_schema cross-module events already emitted
+fn try_load_schema(correlation_id: &str) -> std::result::Result<Option<ProjectSchema>, ()> {
+    match load_schema(Path::new(".")) {
+        Err(SchemaError::NotFound { .. }) => Ok(None),
+        Err(e) => {
+            emit_schema_failure(Path::new(EVENTS_FILE), &e, correlation_id);
+            emit(
+                "OntologyReviewFailedSchemaInvalid",
+                "ontology_suggest",
+                correlation_id,
+                json!({
+                    "failure_reason": "schema_invalid",
+                    "error_detail":   e.message(),
+                }),
+            );
+            Err(())
+        }
+        Ok(schema) => match validate(&schema) {
+            Err(e) => {
+                emit_schema_failure(Path::new(EVENTS_FILE), &e, correlation_id);
+                emit(
+                    "OntologyReviewFailedSchemaInvalid",
+                    "ontology_suggest",
+                    correlation_id,
+                    json!({
+                        "failure_reason": "schema_invalid",
+                        "error_detail":   e.message(),
+                    }),
+                );
+                Err(())
+            }
+            Ok(()) => Ok(Some(schema)),
+        },
+    }
+}
+
+// ─── Snapshot ─────────────────────────────────────────────────────────────────
+
 fn build_snapshot(
     registry: &HashMap<String, (String, String)>,
     links: &[(String, String, String)],
@@ -238,10 +362,8 @@ fn build_snapshot(
     ids.sort();
     for id in &ids {
         let (itype, desc) = &registry[*id];
-        let status = current_status(events, id)
-            .unwrap_or_else(|| "none".to_string());
-        let priority = current_priority(events, id)
-            .unwrap_or_else(|| "none".to_string());
+        let status = current_status(events, id).unwrap_or_else(|| "none".to_string());
+        let priority = current_priority(events, id).unwrap_or_else(|| "none".to_string());
         out.push_str(&format!(
             "- id={} type={} status={} priority={} description={}\n",
             id, itype, status, priority, desc
@@ -258,13 +380,19 @@ fn build_snapshot(
     out
 }
 
-// Validate a single proposal against registry and active links.
-// Returns None if valid, or Some(reason) if invalid and should be skipped.
+// ─── Proposal validation ──────────────────────────────────────────────────────
+
+/// Validate a single proposal. Returns None if valid, Some(reason) if invalid.
+///
+/// When `schema` is Some, uses vocabulary-driven type/status validation.
+/// When `schema` is None, uses hardcoded fallback (pre-R11 behaviour).
+/// Validation is per-proposal; callers must not batch-invalidate on any result.
 fn validate_proposal(
     proposal: &Value,
     registry: &HashMap<String, (String, String)>,
     active_links: &[(String, String, String)],
     events: &[Value],
+    schema: Option<&ProjectSchema>,
 ) -> Option<String> {
     let ptype = proposal["type"].as_str().unwrap_or("");
     match ptype {
@@ -275,16 +403,35 @@ fn validate_proposal(
             if src.is_empty() || lt.is_empty() || tgt.is_empty() {
                 return Some("link proposal missing required fields".to_string());
             }
-            let src_type = match registry.get(src) {
+            let src_stored_type = match registry.get(src) {
                 Some((t, _)) => t.as_str(),
-                None => return Some(format!("source item {} not found in project record", src)),
+                None => return Some(format!("source item {} not found", src)),
             };
-            let tgt_type = match registry.get(tgt) {
+            let tgt_stored_type = match registry.get(tgt) {
                 Some((t, _)) => t.as_str(),
-                None => return Some(format!("target item {} not found in project record", tgt)),
+                None => return Some(format!("target item {} not found", tgt)),
             };
-            if !is_valid_link_type(lt, src_type, tgt_type) {
-                return Some(format!("invalid link type {} for {}->{}", lt, src_type, tgt_type));
+            let link_valid = match schema {
+                Some(s) => {
+                    // Resolve stored types to canonical concepts before comparison
+                    // (Representation Ban: no alias strings in domain logic)
+                    match (
+                        resolve_type(s, src_stored_type),
+                        resolve_type(s, tgt_stored_type),
+                    ) {
+                        (Some(src_c), Some(tgt_c)) => {
+                            is_valid_link_type_vocab(s, lt, src_c, tgt_c)
+                        }
+                        _ => false,
+                    }
+                }
+                None => is_valid_link_type_hardcoded(lt, src_stored_type, tgt_stored_type),
+            };
+            if !link_valid {
+                return Some(format!(
+                    "invalid link type {} for {}->{}",
+                    lt, src_stored_type, tgt_stored_type
+                ));
             }
             if active_links.iter().any(|(s, l, t)| s == src && l == lt && t == tgt) {
                 return Some("link already exists".to_string());
@@ -299,9 +446,19 @@ fn validate_proposal(
             }
             let itype = match registry.get(item_id) {
                 Some((t, _)) => t.as_str(),
-                None => return Some(format!("item {} not found in project record", item_id)),
+                None => return Some(format!("item {} not found", item_id)),
             };
-            if !valid_statuses(itype).contains(&proposed) {
+            let status_valid = match schema {
+                Some(s) => {
+                    // Resolve stored type to canonical concept before status lookup
+                    match resolve_type(s, itype) {
+                        Some(canonical) => is_valid_status(s, canonical, proposed),
+                        None => false,
+                    }
+                }
+                None => valid_statuses_hardcoded(itype).contains(&proposed),
+            };
+            if !status_valid {
                 return Some(format!("invalid status {} for type {}", proposed, itype));
             }
             if current_status(events, item_id).as_deref() == Some(proposed) {
@@ -316,7 +473,7 @@ fn validate_proposal(
                 return Some("priority proposal missing required fields".to_string());
             }
             if registry.get(item_id).is_none() {
-                return Some(format!("item {} not found in project record", item_id));
+                return Some(format!("item {} not found", item_id));
             }
             if !["high", "medium", "low"].contains(&proposed) {
                 return Some(format!("invalid priority {}", proposed));
@@ -330,12 +487,34 @@ fn validate_proposal(
     }
 }
 
+// ─── Commands ─────────────────────────────────────────────────────────────────
+
 async fn cmd_propose() -> Result<()> {
     let events = read_events()?;
-    let registry = build_item_registry(&events);
+    let full_registry = build_item_registry(&events);
+    let total_item_count = full_registry.len() as u64;
     let correlation_id = Uuid::new_v4().to_string();
 
-    if registry.is_empty() {
+    // OntologyReviewRequested is always emitted first, before any failure checks.
+    // item_count reflects total record size at trigger time.
+    emit(
+        "OntologyReviewRequested",
+        "ontology_suggest",
+        &correlation_id,
+        json!({ "item_count": total_item_count }),
+    );
+
+    // Failure check 1: SchemaLoadFailed (terminal)
+    let schema_opt = match try_load_schema(&correlation_id) {
+        Ok(s) => s,
+        Err(()) => {
+            eprintln!("Error: schema load failed.");
+            std::process::exit(1);
+        }
+    };
+
+    // Failure check 2: EmptyProjectRecord (terminal)
+    if full_registry.is_empty() {
         emit(
             "OntologyReviewFailedEmptyRecord",
             "ontology_suggest",
@@ -346,50 +525,82 @@ async fn cmd_propose() -> Result<()> {
         std::process::exit(1);
     }
 
-    let item_count = registry.len() as u64;
-    emit(
-        "OntologyReviewRequested",
-        "ontology_suggest",
-        &correlation_id,
-        json!({ "item_count": item_count }),
-    );
+    // Determine the analysis registry and vocabulary context.
+    // When schema is loaded: filter to recognized items; build dynamic prompt.
+    // When no schema (SchemaNotFound): use full registry; use hardcoded prompt.
+    let (registry, vocab_context) = match &schema_opt {
+        Some(schema) => {
+            let recognized = filter_recognized_items(&full_registry, schema);
+            let vocab = build_vocab_context(schema);
+            (recognized, Some(vocab))
+        }
+        None => (full_registry, None),
+    };
+
+    // Failure check 3: NoRecognizedItems (terminal; only applies when schema loaded)
+    if schema_opt.is_some() && registry.is_empty() {
+        emit(
+            "OntologyReviewFailedNoRecognizedItems",
+            "ontology_suggest",
+            &correlation_id,
+            json!({
+                "failure_reason": "no_recognized_items",
+                "item_count":     total_item_count,
+            }),
+        );
+        eprintln!("Error: no items with recognized entity types.");
+        std::process::exit(1);
+    }
 
     let active_links = build_active_links(&events);
     let snapshot = build_snapshot(&registry, &active_links, &events);
 
-    let raw_proposals = match suggester::suggest_proposals(&snapshot).await {
-        Ok(p) => p,
-        Err(e) => {
-            emit(
-                "OntologyReviewFailedLLMUnavailable",
-                "ontology_suggest",
-                &correlation_id,
-                json!({
-                    "failure_reason": "llm_unavailable",
-                    "error_detail": e.to_string(),
-                }),
-            );
-            eprintln!("Error: LLM unavailable — {}", e);
-            std::process::exit(1);
-        }
-    };
+    // LLM call — only reached when all three failure checks pass
+    let raw_proposals =
+        match suggester::suggest_proposals(&snapshot, vocab_context.as_deref()).await {
+            Ok(p) => p,
+            Err(e) => {
+                emit(
+                    "OntologyReviewFailedLLMUnavailable",
+                    "ontology_suggest",
+                    &correlation_id,
+                    json!({
+                        "failure_reason": "llm_unavailable",
+                        "error_detail":   e.to_string(),
+                    }),
+                );
+                eprintln!("Error: LLM unavailable — {}", e);
+                std::process::exit(1);
+            }
+        };
 
-    // Filter out invalid proposals before surfacing to PM.
+    // Post-generation filtering: per-proposal vocabulary validation.
+    // Each invalid proposal is discarded individually (contract invariant).
+    let generated_count = raw_proposals.len() as u64;
     let valid_proposals: Vec<Value> = raw_proposals
         .into_iter()
-        .filter(|p| validate_proposal(p, &registry, &active_links, &events).is_none())
+        .filter(|p| {
+            validate_proposal(p, &registry, &active_links, &events, schema_opt.as_ref())
+                .is_none()
+        })
         .collect();
 
     let review_id = Uuid::new_v4().to_string();
     let proposal_count = valid_proposals.len() as u64;
+    let rejected_count = generated_count - proposal_count;
 
+    // Schema invariants enforced by construction:
+    //   proposal_count == valid_proposals.len()
+    //   generated_count == proposal_count + rejected_count
     emit(
         "OntologyReviewProposed",
         "ontology_suggest",
         &correlation_id,
         json!({
             "review_id":       review_id,
+            "generated_count": generated_count,
             "proposal_count":  proposal_count,
+            "rejected_count":  rejected_count,
             "proposals":       valid_proposals.clone(),
         }),
     );
@@ -429,7 +640,6 @@ fn cmd_confirm(
     let events = read_events()?;
     let correlation_id = Uuid::new_v4().to_string();
 
-    // Find the OntologyReviewProposed event for this review_id.
     let review_event = events.iter().find(|e| {
         e["event_type"].as_str() == Some("OntologyReviewProposed")
             && e["payload"]["review_id"].as_str() == Some(review_id)
@@ -500,8 +710,11 @@ fn cmd_confirm(
             }
         };
 
+        // Confirm-time validation uses hardcoded fallback (None schema).
+        // Vocabulary enforcement at confirm time delegates to the owning
+        // modules (item_links R4, item_status R5) per the scope boundary.
         if let Some(reason) =
-            validate_proposal(&proposal, &registry, &active_links, &events_at_confirm)
+            validate_proposal(&proposal, &registry, &active_links, &events_at_confirm, None)
         {
             eprintln!("Skipping {}: {}", pid, reason);
             skipped_ids.push(pid.clone());
