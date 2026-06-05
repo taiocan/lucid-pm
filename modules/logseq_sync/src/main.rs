@@ -28,7 +28,9 @@ struct RecordedItem {
 struct TaskRecord {
     task_id: String,
     item_type: String,
+    #[allow(dead_code)]
     description: String,
+    #[allow(dead_code)]
     parent_item_id: String,
     current_marker: String,
 }
