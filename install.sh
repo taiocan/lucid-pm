@@ -23,6 +23,7 @@ MODULES=(
   project_schema
   project_state
   report_export
+  task_model
 )
 
 echo "LucidPM installer"
