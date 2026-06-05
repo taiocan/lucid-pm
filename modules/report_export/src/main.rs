@@ -189,7 +189,7 @@ fn effective_status_priority(events: &[Value], item_id: &str) -> (Option<String>
 
 fn build_items(events: &[Value]) -> Vec<ItemRecord> {
     let sessions = incorporated_sessions(events);
-    sessions.iter().flat_map(|(sid, _)| {
+    let mut items: Vec<ItemRecord> = sessions.iter().flat_map(|(sid, _)| {
         confirmed_items_for_session(events, sid)
             .into_iter()
             .map(|(id, ty, desc)| {
@@ -197,7 +197,29 @@ fn build_items(events: &[Value]) -> Vec<ItemRecord> {
                 ItemRecord { item_id: id, item_type: ty, description: desc,
                              session_id: sid.clone(), status, priority }
             })
-    }).collect()
+    }).collect();
+    // Task instances from TaskAdded events
+    for e in events {
+        if e["source_module"].as_str() == Some("task_model")
+            && e["event_type"].as_str() == Some("TaskAdded")
+        {
+            let p = &e["payload"];
+            let task_id = p["task_id"].as_str().unwrap_or("").to_string();
+            let item_type = p["item_type"].as_str().unwrap_or("").to_string();
+            if !task_id.is_empty() && !item_type.is_empty() {
+                let (status, priority) = effective_status_priority(events, &task_id);
+                items.push(ItemRecord {
+                    item_id: task_id,
+                    item_type,
+                    description: p["description"].as_str().unwrap_or("").to_string(),
+                    session_id: "task_model".to_string(),
+                    status,
+                    priority,
+                });
+            }
+        }
+    }
+    items
 }
 
 fn pri_display(p: Option<&str>) -> &str { p.unwrap_or("-") }

@@ -45,6 +45,7 @@ The purpose of this project is to evaluate the functionality of Codeos by develo
 | R9 (logseq_sync) | schema-driven status validation; alias resolution; SyncFailedSchemaInvalid | 9 | COMPLETE |
 | R10 (project_state) | schema-driven view: vocabulary-filtered inclusion, canonical type display, SchemaLoadFailed | 9 | COMPLETE |
 | R11 (ontology_suggest) | schema-driven proposals: vocabulary-filtered analysis, alias resolution, SchemaLoadFailed, NoRecognizedItems, filtering observability | 9 | COMPLETE |
+| task_model | task instances as first-class project record items; task add command; nested Logseq export; sync marker update and discovery; marker-derived status | 9 | COMPLETE |
 
 Stages: 1-Intent / 2-Contract / 3-Schema / 4-Implement / 5-Tests / 6-Observe / 7-Reconcile / 8-Replay / 9-Refine
 

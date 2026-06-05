@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use project_schema::{load_and_validate, marker_to_status, resolve_type, ProjectSchema};
+use project_schema::{is_block_type, load_and_validate, marker_to_status, resolve_type, ProjectSchema};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
@@ -184,7 +184,58 @@ fn read_all_record_items() -> Result<Vec<RecordedItem>> {
     for sid in sessions {
         all.extend(find_confirmed_items(&sid)?);
     }
+    // Task instances from TaskAdded events
+    if Path::new(EVENTS_FILE).exists() {
+        let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
+        for line in std::io::BufReader::new(file).lines() {
+            let line = line.context("reading events file")?;
+            if line.trim().is_empty() { continue; }
+            let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+            if event["source_module"].as_str() == Some("task_model")
+                && event["event_type"].as_str() == Some("TaskAdded")
+            {
+                let p = &event["payload"];
+                let task_id = p["task_id"].as_str().unwrap_or("").to_string();
+                let item_type = p["item_type"].as_str().unwrap_or("").to_string();
+                if !task_id.is_empty() && !item_type.is_empty() {
+                    all.push(RecordedItem {
+                        item_id: task_id,
+                        item_type,
+                        description: p["description"].as_str().unwrap_or("").to_string(),
+                    });
+                }
+            }
+        }
+    }
     Ok(all)
+}
+
+/// Read the current marker for a task instance: latest TaskMarkerUpdated.new_marker,
+/// falling back to TaskAdded.initial_marker if no update exists.
+fn current_task_marker(task_id: &str) -> Result<Option<String>> {
+    if !Path::new(EVENTS_FILE).exists() { return Ok(None); }
+    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
+    let mut current: Option<String> = None;
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line.context("reading events file")?;
+        if line.trim().is_empty() { continue; }
+        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+        if event["source_module"].as_str() != Some("task_model") { continue; }
+        match event["event_type"].as_str() {
+            Some("TaskAdded")
+                if event["payload"]["task_id"].as_str() == Some(task_id) =>
+            {
+                current = event["payload"]["initial_marker"].as_str().map(String::from);
+            }
+            Some("TaskMarkerUpdated")
+                if event["payload"]["task_id"].as_str() == Some(task_id) =>
+            {
+                current = event["payload"]["new_marker"].as_str().map(String::from);
+            }
+            _ => {}
+        }
+    }
+    Ok(current)
 }
 
 fn find_item(item_id: &str) -> Result<Option<RecordedItem>> {
@@ -437,13 +488,23 @@ fn cmd_get(item_id: &str) -> Result<()> {
     let (prop_status, prop_priority) = proposed_values_from_extraction(item_id)?;
 
     // Effective status resolution chain (contract invariant, highest to lowest priority):
-    //   1. explicit  — most recent ItemStatusUpdated event
-    //   2. marker_derived — task marker in vocabulary mapping, no explicit event
-    //   3. proposed  — proposed_status from extraction
+    //   1. explicit       — most recent ItemStatusUpdated event
+    //   2. marker_derived — for block-type items: marker from TaskAdded/TaskMarkerUpdated;
+    //                       for other items: marker extracted from description prefix
+    //   3. proposed       — proposed_status from extraction
     //   4. null
+    //
+    // Representation Ban: is_block_type resolves via vocabulary API before branching.
     let (effective_status, status_source): (Option<String>, Option<&str>) =
         if let Some(s) = explicit_status {
             (Some(s), Some("explicit"))
+        } else if is_block_type(&schema, &item.item_type) {
+            // Task-type item: read marker from event log (TaskAdded + TaskMarkerUpdated)
+            let marker = current_task_marker(item_id)?;
+            match marker.as_deref().and_then(|m| marker_to_status(&schema, m)) {
+                Some(mapped) => (Some(mapped.to_string()), Some("marker_derived")),
+                None => (prop_status.clone(), prop_status.as_ref().map(|_| "proposed")),
+            }
         } else if let Some(marker) = extract_marker(&item.description) {
             if let Some(mapped) = marker_to_status(&schema, &marker) {
                 (Some(mapped.to_string()), Some("marker_derived"))

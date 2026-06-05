@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use project_schema::{load_and_validate, resolve_type, ProjectSchema};
+use project_schema::{is_block_type, load_and_validate, marker_to_status, resolve_type, ProjectSchema};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -23,6 +23,14 @@ struct Cli {
 struct RecordedItem {
     item_id: String,
     item_type: String,
+}
+
+struct TaskRecord {
+    task_id: String,
+    item_type: String,
+    description: String,
+    parent_item_id: String,
+    current_marker: String,
 }
 
 // Representation Ban: domain logic operates on vocabulary-resolved concept identity.
@@ -58,6 +66,26 @@ fn emit_event(event_type: &str, correlation_id: &str, payload: Value) {
         "correlation_id": correlation_id,
         "source_module": SOURCE_MODULE,
         "payload": payload,
+    });
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(EVENTS_FILE)
+        .expect("Failed to open events file");
+    writeln!(file, "{}", event).expect("Failed to write event");
+}
+
+/// Emit a task_model event during sync. source_module is "task_model" so that
+/// discovered tasks and marker updates are indistinguishable from direct-command
+/// task_model events (contract indistinguishability invariant).
+fn emit_task_event(event_type: &str, correlation_id: &str, payload: Value) {
+    let event = json!({
+        "event_id":       Uuid::new_v4().to_string(),
+        "event_type":     event_type,
+        "timestamp":      timestamp_ms(),
+        "correlation_id": correlation_id,
+        "source_module":  "task_model",
+        "payload":        payload,
     });
     let mut file = OpenOptions::new()
         .create(true)
@@ -139,7 +167,106 @@ fn read_all_record_items() -> Result<Vec<RecordedItem>> {
     for sid in sessions {
         all.extend(find_confirmed_items(&sid)?);
     }
+    // Task instances
+    if Path::new(EVENTS_FILE).exists() {
+        let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
+        for line in std::io::BufReader::new(file).lines() {
+            let line = line.context("reading events file")?;
+            if line.trim().is_empty() { continue; }
+            let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+            if event["source_module"].as_str() == Some("task_model")
+                && event["event_type"].as_str() == Some("TaskAdded")
+            {
+                let p = &event["payload"];
+                let task_id = p["task_id"].as_str().unwrap_or("").to_string();
+                let item_type = p["item_type"].as_str().unwrap_or("").to_string();
+                if !task_id.is_empty() && !item_type.is_empty() {
+                    all.push(RecordedItem { item_id: task_id, item_type });
+                }
+            }
+        }
+    }
     Ok(all)
+}
+
+/// Read all task instances with their current markers.
+fn read_all_task_records() -> Result<Vec<TaskRecord>> {
+    if !Path::new(EVENTS_FILE).exists() {
+        return Ok(vec![]);
+    }
+    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
+    let events: Vec<Value> = std::io::BufReader::new(file)
+        .lines()
+        .filter_map(|l| l.ok())
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(&l).ok())
+        .collect();
+
+    let mut tasks: Vec<TaskRecord> = events.iter()
+        .filter(|e| {
+            e["source_module"].as_str() == Some("task_model")
+                && e["event_type"].as_str() == Some("TaskAdded")
+        })
+        .filter_map(|e| {
+            let p = &e["payload"];
+            let task_id = p["task_id"].as_str()?.to_string();
+            let item_type = p["item_type"].as_str()?.to_string();
+            let parent_item_id = p["parent_item_id"].as_str()?.to_string();
+            let current_marker = p["initial_marker"].as_str().unwrap_or("TODO").to_string();
+            Some(TaskRecord {
+                task_id,
+                item_type,
+                description: p["description"].as_str().unwrap_or("").to_string(),
+                parent_item_id,
+                current_marker,
+            })
+        })
+        .collect();
+
+    // Apply TaskMarkerUpdated events
+    for e in &events {
+        if e["source_module"].as_str() == Some("task_model")
+            && e["event_type"].as_str() == Some("TaskMarkerUpdated")
+        {
+            if let Some(task_id) = e["payload"]["task_id"].as_str() {
+                if let Some(task) = tasks.iter_mut().find(|t| t.task_id == task_id) {
+                    if let Some(new_marker) = e["payload"]["new_marker"].as_str() {
+                        task.current_marker = new_marker.to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(tasks)
+}
+
+/// Parse task block lines from Logseq page content.
+/// Returns (marker, task_id, description) tuples.
+/// Format: `    - <MARKER> task-id: <uuid> <description>`
+fn parse_task_block_lines(content: &str) -> Vec<(String, String, String)> {
+    let mut results = Vec::new();
+    for line in content.lines() {
+        // Look for task-id: annotation anywhere in the line
+        if let Some(tid_pos) = line.find("task-id: ") {
+            let after_tid = &line[tid_pos + "task-id: ".len()..];
+            let mut parts = after_tid.splitn(2, ' ');
+            let task_id = parts.next().unwrap_or("").trim().to_string();
+            let description = parts.next().unwrap_or("").trim().to_string();
+            if task_id.is_empty() { continue; }
+            // Extract marker: first uppercase token after `- ` (possibly with leading whitespace)
+            let trimmed = line.trim_start();
+            let marker = trimmed
+                .strip_prefix("- ")
+                .and_then(|rest| rest.split_whitespace().next())
+                .unwrap_or("")
+                .to_string();
+            if !marker.is_empty() {
+                results.push((marker, task_id, description));
+            }
+        }
+    }
+    results
 }
 
 /// Most recent explicit status for item_id, from item_status or logseq_sync.
@@ -394,6 +521,84 @@ fn cmd_sync(graph_dir: &str) -> Result<()> {
                     println!(
                         "Updated priority: {} ({}) → {}",
                         &item.item_id[..8.min(item.item_id.len())], item.item_type, lp
+                    );
+                }
+            }
+        }
+    }
+
+    // Scan task block lines in each page (logseq_sync task amendment).
+    // Representation Ban: is_block_type + marker_to_status resolve via vocabulary API.
+    let task_records = read_all_task_records()?;
+    let known_task_ids: std::collections::HashSet<String> =
+        task_records.iter().map(|t| t.task_id.clone()).collect();
+
+    // Build item_id → parent_item_id map for discovering tasks' parent context
+    let item_page_map_keys: Vec<String> = page_map.keys().cloned().collect();
+
+    for parent_item_id in &item_page_map_keys {
+        let page_path = match page_map.get(parent_item_id.as_str()) {
+            Some(p) => p.clone(),
+            None => continue,
+        };
+        let content = fs::read_to_string(&page_path)
+            .with_context(|| format!("reading page {}", page_path.display()))?;
+
+        let task_lines = parse_task_block_lines(&content);
+
+        for (marker, task_id, description) in task_lines {
+            // Contract: identifier-less lines silently skipped (already excluded by parse fn)
+            // Representation Ban: marker_to_status uses vocabulary API
+            if marker_to_status(&schema, &marker).is_none() {
+                // TaskMarkerSyncSkipped — marker not vocabulary-recognized; task unchanged
+                continue;
+            }
+
+            if known_task_ids.contains(&task_id) {
+                // Known task — check if marker changed
+                if let Some(task) = task_records.iter().find(|t| t.task_id == task_id) {
+                    if task.current_marker != marker {
+                        any_difference = true;
+                        emit_task_event("TaskMarkerUpdated", &correlation_id, json!({
+                            "task_id":         task_id,
+                            "previous_marker": task.current_marker,
+                            "new_marker":      marker,
+                        }));
+                        changes_applied += 1;
+                        println!(
+                            "Updated task marker: {}... {} → {}",
+                            &task_id[..8.min(task_id.len())],
+                            task.current_marker,
+                            marker
+                        );
+                    }
+                }
+            } else {
+                // Unknown task_id — discover as new task instance (HP6: discovery)
+                // Determine canonical task type from the vocabulary
+                let canonical_type = task_records.iter()
+                    .find(|t| is_block_type(&schema, &t.item_type))
+                    .map(|t| t.item_type.clone())
+                    .or_else(|| {
+                        schema.block_types.keys()
+                            .find(|_| true)
+                            .map(|k| k.to_string())
+                    });
+
+                if let Some(item_type) = canonical_type {
+                    any_difference = true;
+                    emit_task_event("TaskAdded", &correlation_id, json!({
+                        "task_id":        task_id,
+                        "item_type":      item_type,
+                        "description":    description,
+                        "parent_item_id": parent_item_id,
+                        "initial_marker": marker,
+                    }));
+                    changes_applied += 1;
+                    println!(
+                        "Discovered task: {}... under {}...",
+                        &task_id[..8.min(task_id.len())],
+                        &parent_item_id[..8.min(parent_item_id.len())]
                     );
                 }
             }

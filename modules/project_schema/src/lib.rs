@@ -482,6 +482,27 @@ pub fn all_status_names(schema: &ProjectSchema) -> Vec<&str> {
     schema.statuses.keys().map(|s| s.as_str()).collect()
 }
 
+/// Check if `type_name` resolves to a block type concept.
+/// Representation Ban: concept resolution via resolve_type before the check.
+pub fn is_block_type(schema: &ProjectSchema, type_name: &str) -> bool {
+    resolve_type(schema, type_name)
+        .map(|canonical| schema.block_types.contains_key(canonical))
+        .unwrap_or(false)
+}
+
+/// Return the first block type that has a non-empty marker mapping (sorted
+/// alphabetically for determinism), or None if no such block type exists.
+/// The returned canonical name is the task block type concept for this vocabulary.
+pub fn canonical_task_block_type<'a>(
+    schema: &'a ProjectSchema,
+) -> Option<(&'a str, &'a HashMap<String, String>)> {
+    let mut entries: Vec<_> = schema.block_types.iter()
+        .filter(|(_, def)| !def.markers.is_empty())
+        .collect();
+    entries.sort_by_key(|(name, _)| name.as_str());
+    entries.into_iter().next().map(|(name, def)| (name.as_str(), &def.markers))
+}
+
 // ─── Event emission ───────────────────────────────────────────────────────────
 
 fn timestamp_ms() -> u64 {

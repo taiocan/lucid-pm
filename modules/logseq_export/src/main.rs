@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use project_schema::{
-    emit_type_unknown, load_and_validate, logseq_forward_label, logseq_inverse_label,
-    resolve_type, ProjectSchema,
+    emit_type_unknown, is_block_type, load_and_validate, logseq_forward_label,
+    logseq_inverse_label, resolve_type, ProjectSchema,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -23,10 +23,14 @@ struct Cli {
     output_dir: String,
 }
 
+#[derive(Clone)]
 struct RecordedItem {
     item_id: String,
     item_type: String,
     description: String,
+    parent_item_id: Option<String>,
+    /// current marker for task-type items (from TaskAdded or latest TaskMarkerUpdated)
+    current_marker: Option<String>,
 }
 
 struct LinkRecord {
@@ -122,6 +126,8 @@ fn find_confirmed_items(session_id: &str) -> Result<Vec<RecordedItem>> {
             item_id: item["item_id"].as_str().unwrap_or("").to_string(),
             item_type: item["item_type"].as_str().unwrap_or("").to_string(),
             description: item["description"].as_str().unwrap_or("").to_string(),
+            parent_item_id: None,
+            current_marker: None,
         })
         .collect();
 
@@ -133,6 +139,51 @@ fn read_all_record_items() -> Result<Vec<RecordedItem>> {
     let mut all = Vec::new();
     for sid in sessions {
         all.extend(find_confirmed_items(&sid)?);
+    }
+    // Task instances from TaskAdded events, with their current marker
+    if Path::new(EVENTS_FILE).exists() {
+        let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
+        let events: Vec<Value> = std::io::BufReader::new(file)
+            .lines()
+            .filter_map(|l| l.ok())
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(&l).ok())
+            .collect();
+
+        // Collect tasks
+        let mut tasks: Vec<RecordedItem> = events.iter()
+            .filter(|e| {
+                e["source_module"].as_str() == Some("task_model")
+                    && e["event_type"].as_str() == Some("TaskAdded")
+            })
+            .filter_map(|e| {
+                let p = &e["payload"];
+                let task_id = p["task_id"].as_str()?.to_string();
+                let item_type = p["item_type"].as_str()?.to_string();
+                Some(RecordedItem {
+                    item_id: task_id,
+                    item_type,
+                    description: p["description"].as_str().unwrap_or("").to_string(),
+                    parent_item_id: p["parent_item_id"].as_str().map(String::from),
+                    current_marker: p["initial_marker"].as_str().map(String::from),
+                })
+            })
+            .collect();
+
+        // Apply TaskMarkerUpdated events to get current markers
+        for e in &events {
+            if e["source_module"].as_str() == Some("task_model")
+                && e["event_type"].as_str() == Some("TaskMarkerUpdated")
+            {
+                if let Some(task_id) = e["payload"]["task_id"].as_str() {
+                    if let Some(task) = tasks.iter_mut().find(|t| t.item_id == task_id) {
+                        task.current_marker = e["payload"]["new_marker"].as_str().map(String::from);
+                    }
+                }
+            }
+        }
+
+        all.extend(tasks);
     }
     Ok(all)
 }
@@ -468,37 +519,57 @@ fn cmd_export(output_dir: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Filter items: skip those with unrecognized entity types.
-    // emit_type_unknown is called per excluded item (SchemaTypeUnknown from project_schema module).
+    // Separate task instances (block types) from page items.
+    // Representation Ban: is_block_type resolves via vocabulary API.
     let mut items_excluded: u32 = 0;
-    let recognized_items: Vec<(&RecordedItem, &str)> = items
-        .iter()
-        .filter_map(|item| {
-            match resolve_type(&schema, &item.item_type) {
-                Some(canonical) => Some((item, canonical)),
-                None => {
-                    emit_type_unknown(events_path, &item.item_id, &item.item_type, &correlation_id);
-                    eprintln!(
-                        "warning: item {} has unrecognized type '{}' — excluded from export",
-                        item.item_id, item.item_type
-                    );
-                    items_excluded += 1;
-                    None
-                }
-            }
-        })
-        .collect();
+    let mut page_items: Vec<(&RecordedItem, &str)> = Vec::new();
+    let mut task_items: Vec<&RecordedItem> = Vec::new();
 
-    let slug_map = build_slug_map(&items);
+    for item in &items {
+        match resolve_type(&schema, &item.item_type) {
+            None => {
+                emit_type_unknown(events_path, &item.item_id, &item.item_type, &correlation_id);
+                eprintln!(
+                    "warning: item {} has unrecognized type '{}' — excluded from export",
+                    item.item_id, item.item_type
+                );
+                items_excluded += 1;
+            }
+            Some(canonical) if is_block_type(&schema, canonical) => {
+                task_items.push(item);
+            }
+            Some(canonical) => {
+                page_items.push((item, canonical));
+            }
+        }
+    }
+
+    // slug_map covers only page items (tasks are nested blocks, not pages)
+    let page_items_for_slug: Vec<RecordedItem> = items.iter()
+        .filter(|i| resolve_type(&schema, &i.item_type)
+            .map(|c| !is_block_type(&schema, c))
+            .unwrap_or(false))
+        .cloned()
+        .collect();
+    let slug_map = build_slug_map(&page_items_for_slug);
     let links = build_active_links()?;
     let mut pages_written: Vec<String> = Vec::new();
 
-    for (item, canonical_type) in &recognized_items {
+    // Group tasks by parent_item_id for embedding in parent pages
+    let mut tasks_by_parent: std::collections::HashMap<String, Vec<&RecordedItem>> =
+        std::collections::HashMap::new();
+    for task in &task_items {
+        if let Some(ref parent_id) = task.parent_item_id {
+            tasks_by_parent.entry(parent_id.clone()).or_default().push(task);
+        }
+    }
+
+    for (item, canonical_type) in &page_items {
         let slug = slug_map.get(&item.item_id).cloned().unwrap_or_else(|| item.item_id.clone());
         let status = effective_status(&item.item_id)?;
         let priority = effective_priority(&item.item_id)?;
         let deadline = current_deadline(&item.item_id)?;
-        let content = render_page(
+        let mut content = render_page(
             item,
             canonical_type,
             status.as_deref(),
@@ -508,23 +579,38 @@ fn cmd_export(output_dir: &str) -> Result<()> {
             &slug_map,
             &schema,
         );
+
+        // Append task block lines for tasks whose parent is this item
+        if let Some(child_tasks) = tasks_by_parent.get(&item.item_id) {
+            content.push_str("\n- Tasks\n");
+            for task in child_tasks {
+                let marker = task.current_marker.as_deref().unwrap_or("TODO");
+                content.push_str(&format!(
+                    "    - {} task-id: {} {}\n",
+                    marker, task.item_id, task.description
+                ));
+            }
+        }
+
         let page_path = pages_dir.join(format!("{}.md", slug));
         fs::write(&page_path, &content)
             .with_context(|| format!("writing page {}", page_path.display()))?;
         pages_written.push(page_path.to_string_lossy().into_owned());
     }
 
-    // Remove pages that are no longer in the current export set
-    let current_slugs: Vec<String> = recognized_items
+    // Remove pages that are no longer in the current export set (tasks never have pages)
+    let current_slugs: Vec<String> = page_items
         .iter()
         .filter_map(|(item, _)| slug_map.get(&item.item_id).cloned())
         .collect();
     remove_stale_pages(&pages_dir, &current_slugs);
 
-    let item_count = recognized_items.len() as u64;
+    let item_count = (page_items.len() + task_items.len()) as u64;
     println!(
-        "Exported {} item(s) to '{}'.{}",
+        "Exported {} item(s) ({} page(s), {} task(s)) to '{}'.{}",
         item_count,
+        page_items.len(),
+        task_items.len(),
         output_dir,
         if items_excluded > 0 { format!(" ({} excluded: unrecognized type)", items_excluded) } else { String::new() }
     );

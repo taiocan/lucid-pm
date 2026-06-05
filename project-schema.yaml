@@ -1,0 +1,23 @@
+# LucidPM project vocabulary — F12 (task_model) activation
+# Extends the default schema and activates task as a block type.
+extends: ~/.lucidpm/default-schema.yaml
+
+# Override Task page type: clear the "task" alias so it no longer collides
+# with the blockType "task" canonical name introduced below.
+# Existing extraction-derived items stored as "task" (lowercase) will be
+# recognized via the blockType entry rather than the pageType alias.
+pageTypes:
+  Task:
+    aliases: []
+
+# Activate task as a block type with marker-to-status mappings.
+# This enables task instances created via `task_model add` and discovered
+# via logseq_sync to have marker-derived effective status resolution.
+blockTypes:
+  task:
+    markers:
+      TODO: todo
+      DOING: doing
+      DONE: done
+      WAITING: waiting
+      CANCELLED: cancelled

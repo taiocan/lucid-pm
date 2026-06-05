@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use project_schema::{all_status_names, emit_type_unknown, load_and_validate, resolve_type, ProjectSchema};
+use project_schema::{all_status_names, emit_type_unknown, is_block_type, load_and_validate, marker_to_status, resolve_type, ProjectSchema};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
@@ -172,7 +172,30 @@ fn proposed_values_for(events: &[Value], item_id: &str) -> (Option<String>, Opti
     if confirmed { (prop_status, prop_priority) } else { (None, None) }
 }
 
-fn effective_status_priority(events: &[Value], item_id: &str) -> (Option<String>, Option<String>) {
+/// Current marker for a task instance (latest TaskMarkerUpdated, else TaskAdded initial).
+fn current_task_marker_from_events(events: &[Value], task_id: &str) -> Option<String> {
+    let mut current = None;
+    for e in events {
+        if e["source_module"].as_str() != Some("task_model") { continue; }
+        match e["event_type"].as_str() {
+            Some("TaskAdded") if e["payload"]["task_id"].as_str() == Some(task_id) => {
+                current = e["payload"]["initial_marker"].as_str().map(String::from);
+            }
+            Some("TaskMarkerUpdated") if e["payload"]["task_id"].as_str() == Some(task_id) => {
+                current = e["payload"]["new_marker"].as_str().map(String::from);
+            }
+            _ => {}
+        }
+    }
+    current
+}
+
+fn effective_status_priority(
+    events: &[Value],
+    item_id: &str,
+    item_type: &str,
+    schema: &ProjectSchema,
+) -> (Option<String>, Option<String>) {
     let mut last_status = None;
     let mut last_priority = None;
 
@@ -189,6 +212,15 @@ fn effective_status_priority(events: &[Value], item_id: &str) -> (Option<String>
                     last_priority = e["payload"]["new_priority"].as_str().map(String::from);
                 }
                 _ => {}
+            }
+        }
+    }
+
+    // Marker-derived status for block-type items (Representation Ban: is_block_type via API)
+    if last_status.is_none() && is_block_type(schema, item_type) {
+        if let Some(marker) = current_task_marker_from_events(events, item_id) {
+            if let Some(mapped) = marker_to_status(schema, &marker) {
+                last_status = Some(mapped.to_string());
             }
         }
     }
@@ -230,13 +262,31 @@ fn cmd_view(
     let events = read_events()?;
     let sessions = incorporated_sessions(&events);
 
-    let all_items: Vec<(String, String, String, String)> = sessions.iter()
+    let mut all_items: Vec<(String, String, String, String)> = sessions.iter()
         .flat_map(|sid| {
             confirmed_items_for_session(&events, sid)
                 .into_iter()
                 .map(|(id, ty, desc)| (id, ty, desc, sid.clone()))
         })
         .collect();
+
+    // Task instances from TaskAdded events
+    for e in &events {
+        if e["source_module"].as_str() == Some("task_model")
+            && e["event_type"].as_str() == Some("TaskAdded")
+        {
+            let task_id = e["payload"]["task_id"].as_str().unwrap_or("").to_string();
+            let item_type = e["payload"]["item_type"].as_str().unwrap_or("").to_string();
+            if !task_id.is_empty() && !item_type.is_empty() {
+                all_items.push((
+                    task_id,
+                    item_type,
+                    e["payload"]["description"].as_str().unwrap_or("").to_string(),
+                    "task_model".to_string(),
+                ));
+            }
+        }
+    }
 
     // Contract failure: EmptyRecord (project record empty before any exclusion).
     if all_items.is_empty() {
@@ -296,7 +346,7 @@ fn cmd_view(
                 );
                 return None;
             }
-            let (status, priority) = effective_status_priority(&events, &item_id);
+            let (status, priority) = effective_status_priority(&events, &item_id, &item_type, &schema);
             Some(ItemSummary { item_id, item_type, description, session_id, status, priority })
         })
         .collect();

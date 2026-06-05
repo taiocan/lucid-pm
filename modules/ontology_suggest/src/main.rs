@@ -139,6 +139,22 @@ fn build_item_registry(events: &[Value]) -> HashMap<String, (String, String)> {
             registry.insert(id, (ty, desc));
         }
     }
+    // Task instances from TaskAdded events
+    for e in events {
+        if e["source_module"].as_str() == Some("task_model")
+            && e["event_type"].as_str() == Some("TaskAdded")
+        {
+            let p = &e["payload"];
+            let task_id = p["task_id"].as_str().unwrap_or("").to_string();
+            let item_type = p["item_type"].as_str().unwrap_or("").to_string();
+            if !task_id.is_empty() && !item_type.is_empty() {
+                registry.insert(
+                    task_id,
+                    (item_type, p["description"].as_str().unwrap_or("").to_string()),
+                );
+            }
+        }
+    }
     registry
 }
 

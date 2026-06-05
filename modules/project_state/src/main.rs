@@ -38,6 +38,7 @@ struct RecordedItem {
     uncertain: bool,
     uncertainty_reason: Option<String>,
     session_id: String,
+    parent_item_id: Option<String>,
 }
 
 fn timestamp_ms() -> u64 {
@@ -142,9 +143,42 @@ fn find_confirmed_items(session_id: &str) -> Result<Vec<RecordedItem>> {
             uncertain: item["uncertain"].as_bool().unwrap_or(false),
             uncertainty_reason: item["uncertainty_reason"].as_str().map(String::from),
             session_id: session_id.to_string(),
+            parent_item_id: None,
         })
         .collect();
 
+    Ok(items)
+}
+
+/// Read task instances from TaskAdded events in the event log.
+fn read_task_items() -> Result<Vec<RecordedItem>> {
+    if !Path::new(EVENTS_FILE).exists() {
+        return Ok(vec![]);
+    }
+    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
+    let mut items = Vec::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line.context("reading events file")?;
+        if line.trim().is_empty() { continue; }
+        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+        if event["source_module"].as_str() == Some("task_model")
+            && event["event_type"].as_str() == Some("TaskAdded")
+        {
+            let p = &event["payload"];
+            let task_id = p["task_id"].as_str().unwrap_or("").to_string();
+            let item_type = p["item_type"].as_str().unwrap_or("").to_string();
+            if task_id.is_empty() || item_type.is_empty() { continue; }
+            items.push(RecordedItem {
+                item_id: task_id,
+                item_type,
+                description: p["description"].as_str().unwrap_or("").to_string(),
+                uncertain: false,
+                uncertainty_reason: None,
+                session_id: "task_model".to_string(),
+                parent_item_id: p["parent_item_id"].as_str().map(String::from),
+            });
+        }
+    }
     Ok(items)
 }
 
@@ -211,9 +245,10 @@ fn cmd_view() -> Result<()> {
     };
 
     let sessions = read_incorporated_sessions()?;
+    let task_items = read_task_items()?;
 
-    // Contract failure: EmptyRecord
-    if sessions.is_empty() {
+    // Contract failure: EmptyRecord — no items of any kind in the project record
+    if sessions.is_empty() && task_items.is_empty() {
         println!("The project record is empty. Run 'incorporate <session_id>' to add items.");
         emit_event("RecordQueryFailedEmpty", &correlation_id, json!({
             "failure_reason": "record_empty",
@@ -226,6 +261,7 @@ fn cmd_view() -> Result<()> {
         let items = find_confirmed_items(session_id)?;
         all_items.extend(items);
     }
+    all_items.extend(task_items);
 
     let session_count = sessions.len();
     // total_count = total items in the project record (pre-exclusion); unchanged semantics.
@@ -258,6 +294,9 @@ fn cmd_view() -> Result<()> {
         if let Some(reason) = &item.uncertainty_reason {
             println!("    Uncertainty: {}", reason);
         }
+        if let Some(parent) = &item.parent_item_id {
+            println!("    Parent: {}...", &parent[..8.min(parent.len())]);
+        }
     }
     println!();
 
@@ -268,6 +307,7 @@ fn cmd_view() -> Result<()> {
         "uncertain": i.uncertain,
         "uncertainty_reason": i.uncertainty_reason,
         "session_id": i.session_id,
+        "parent_item_id": i.parent_item_id,
     })).collect();
 
     emit_event("RecordReturned", &correlation_id, json!({
