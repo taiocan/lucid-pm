@@ -17,6 +17,14 @@ The DBA toolkit is at `.codeos/` (symlinked from `/home/arc/projects/claude/Code
 <!-- Human fills in after running dba-init.sh — what this project exists to do -->
 The purpose of this project is to evaluate the functionality of Codeos by developing a simple project management assistant.
 
+## Backlog
+
+The full feature backlog with dependencies, ordering, and per-feature files is at:
+**`backlog/README.md`**
+
+The Active Features table below tracks only what has entered the DBA pipeline. For
+planned and in-progress work, the backlog is the authoritative source.
+
 ## Active Features
 
 <!-- Human maintains this table — update stage and status as work progresses -->
