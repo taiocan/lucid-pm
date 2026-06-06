@@ -1,0 +1,30 @@
+[package]
+name = "lucid"
+version = "0.1.0"
+edition = "2021"
+
+# lucid is a bash script (bin/lucid). This package exists solely to host
+# the behavioral and replay test suites using the project's standard test layout.
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"
+
+[[test]]
+name = "lucid_behavior"
+path = "../../tests/behavioral/lucid_behavior.rs"
+
+[[test]]
+name = "lucid_replay"
+path = "../../tests/replay/lucid_replay.rs"
+
+[[test]]
+name = "lucid_sync_enforcement_behavior"
+path = "../../tests/behavioral/lucid_sync_enforcement_behavior.rs"
+
+[[test]]
+name = "lucid_sync_enforcement_replay"
+path = "../../tests/replay/lucid_sync_enforcement_replay.rs"

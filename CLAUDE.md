@@ -54,6 +54,9 @@ planned and in-progress work, the backlog is the authoritative source.
 | R10 (project_state) | schema-driven view: vocabulary-filtered inclusion, canonical type display, SchemaLoadFailed | 9 | COMPLETE |
 | R11 (ontology_suggest) | schema-driven proposals: vocabulary-filtered analysis, alias resolution, SchemaLoadFailed, NoRecognizedItems, filtering observability | 9 | COMPLETE |
 | task_model | task instances as first-class project record items; task add command; nested Logseq export; sync marker update and discovery; marker-derived status | 9 | COMPLETE |
+| lucid | unified CLI entry point; dispatcher owns help text; no event emission; UnknownCommand failure mode | 9 | COMPLETE |
+| lucid_sync_enforcement | install-set → dispatcher coverage check; runs in lucid test suite; no runtime behavior change | 9 | COMPLETE |
+| demo | self-contained demo project + Logseq graph + WALKTHROUGH.md; from-scratch workflow; all major features | 9 | COMPLETE |
 
 Stages: 1-Intent / 2-Contract / 3-Schema / 4-Implement / 5-Tests / 6-Observe / 7-Reconcile / 8-Replay / 9-Refine
 
