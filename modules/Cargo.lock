@@ -626,6 +626,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "lucid_core",
  "project_schema",
  "serde",
  "serde_json",
@@ -639,6 +640,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "lucid_core",
  "project_schema",
  "serde",
  "serde_json",
@@ -658,6 +660,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "lucid_core",
  "project_schema",
  "serde",
  "serde_json",
@@ -722,6 +725,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "lucid_core",
  "project_schema",
  "serde",
  "serde_json",
@@ -735,6 +739,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "lucid_core",
  "project_schema",
  "serde",
  "serde_json",
@@ -746,6 +751,16 @@ dependencies = [
 name = "lucid"
 version = "0.1.0"
 dependencies = [
+ "project_schema",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "lucid_core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "project_schema",
  "serde_json",
  "tempfile",
@@ -780,6 +795,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "lucid_core",
  "project_schema",
  "serde",
  "serde_json",
@@ -822,6 +838,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "lucid_core",
  "project_schema",
  "reqwest",
  "serde",
@@ -920,6 +937,7 @@ name = "pm_structuring"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "lucid_core",
  "project_schema",
  "reqwest",
  "serde",
@@ -954,6 +972,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "lucid_core",
  "project_schema",
  "serde",
  "serde_json",
@@ -989,6 +1008,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "lucid_core",
  "project_schema",
  "serde",
  "serde_json",
@@ -1026,6 +1046,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "lucid_core",
  "project_schema",
  "serde",
  "serde_json",
@@ -1371,6 +1392,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "lucid_core",
  "project_schema",
  "serde",
  "serde_json",

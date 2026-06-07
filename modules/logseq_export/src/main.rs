@@ -1,17 +1,16 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use lucid_core::{open_event_log, EventEmitter, RecordedItem, EVENTS_FILE};
 use project_schema::{
     emit_type_unknown, is_block_type, load_and_validate, logseq_forward_label,
-    logseq_inverse_label, resolve_type, EventEnvelope, ProjectSchema,
+    logseq_inverse_label, resolve_type, ProjectSchema,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-const EVENTS_FILE: &str = "events/runtime_events.jsonl";
 const SOURCE_MODULE: &str = "logseq_export";
 
 #[derive(Parser)]
@@ -22,41 +21,16 @@ struct Cli {
     output_dir: String,
 }
 
-#[derive(Clone)]
-struct RecordedItem {
-    item_id: String,
-    item_type: String,
-    description: String,
-    parent_item_id: Option<String>,
-    /// current marker for task-type items (from TaskAdded or latest TaskMarkerUpdated)
-    current_marker: Option<String>,
-}
-
 struct LinkRecord {
     source_id: String,
     link_type: String,
     target_id: String,
 }
 
-fn emit_event(event_type: &str, correlation_id: &str, payload: Value) {
-    project_schema::emit_event(Path::new(EVENTS_FILE), EventEnvelope {
-        source_module: SOURCE_MODULE,
-        event_type,
-        correlation_id,
-        payload,
-    });
-}
-
 fn read_incorporated_sessions() -> Result<Vec<String>> {
-    if !Path::new(EVENTS_FILE).exists() {
-        return Ok(vec![]);
-    }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
     let mut sessions = Vec::new();
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading events file")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         if event["source_module"].as_str() == Some("project_state")
             && event["event_type"].as_str() == Some("ItemsIncorporated")
         {
@@ -69,16 +43,11 @@ fn read_incorporated_sessions() -> Result<Vec<String>> {
 }
 
 fn find_confirmed_items(session_id: &str) -> Result<Vec<RecordedItem>> {
-    let file = fs::File::open(EVENTS_FILE)
-        .with_context(|| format!("opening {}", EVENTS_FILE))?;
-
     let mut items_extracted: Option<Vec<Value>> = None;
     let mut accepted_ids: Option<Vec<String>> = None;
 
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading runtime events")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         if event["correlation_id"].as_str() != Some(session_id) { continue; }
 
         match event["event_type"].as_str() {
@@ -108,8 +77,7 @@ fn find_confirmed_items(session_id: &str) -> Result<Vec<RecordedItem>> {
             item_id: item["item_id"].as_str().unwrap_or("").to_string(),
             item_type: item["item_type"].as_str().unwrap_or("").to_string(),
             description: item["description"].as_str().unwrap_or("").to_string(),
-            parent_item_id: None,
-            current_marker: None,
+            ..Default::default()
         })
         .collect();
 
@@ -123,61 +91,51 @@ fn read_all_record_items() -> Result<Vec<RecordedItem>> {
         all.extend(find_confirmed_items(&sid)?);
     }
     // Task instances from TaskAdded events, with their current marker
-    if Path::new(EVENTS_FILE).exists() {
-        let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
-        let events: Vec<Value> = std::io::BufReader::new(file)
-            .lines()
-            .filter_map(|l| l.ok())
-            .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str(&l).ok())
-            .collect();
+    let events: Vec<Value> = open_event_log(Path::new(EVENTS_FILE))?
+        .filter_map(|r| r.ok())
+        .collect();
 
-        // Collect tasks
-        let mut tasks: Vec<RecordedItem> = events.iter()
-            .filter(|e| {
-                e["source_module"].as_str() == Some("task_model")
-                    && e["event_type"].as_str() == Some("TaskAdded")
+    let mut tasks: Vec<RecordedItem> = events.iter()
+        .filter(|e| {
+            e["source_module"].as_str() == Some("task_model")
+                && e["event_type"].as_str() == Some("TaskAdded")
+        })
+        .filter_map(|e| {
+            let p = &e["payload"];
+            let task_id = p["task_id"].as_str()?.to_string();
+            let item_type = p["item_type"].as_str()?.to_string();
+            Some(RecordedItem {
+                item_id: task_id,
+                item_type,
+                description: p["description"].as_str().unwrap_or("").to_string(),
+                parent_item_id: p["parent_item_id"].as_str().map(String::from),
+                current_marker: p["initial_marker"].as_str().map(String::from),
+                ..Default::default()
             })
-            .filter_map(|e| {
-                let p = &e["payload"];
-                let task_id = p["task_id"].as_str()?.to_string();
-                let item_type = p["item_type"].as_str()?.to_string();
-                Some(RecordedItem {
-                    item_id: task_id,
-                    item_type,
-                    description: p["description"].as_str().unwrap_or("").to_string(),
-                    parent_item_id: p["parent_item_id"].as_str().map(String::from),
-                    current_marker: p["initial_marker"].as_str().map(String::from),
-                })
-            })
-            .collect();
+        })
+        .collect();
 
-        // Apply TaskMarkerUpdated events to get current markers
-        for e in &events {
-            if e["source_module"].as_str() == Some("task_model")
-                && e["event_type"].as_str() == Some("TaskMarkerUpdated")
-            {
-                if let Some(task_id) = e["payload"]["task_id"].as_str() {
-                    if let Some(task) = tasks.iter_mut().find(|t| t.item_id == task_id) {
-                        task.current_marker = e["payload"]["new_marker"].as_str().map(String::from);
-                    }
+    // Apply TaskMarkerUpdated events to get current markers
+    for e in &events {
+        if e["source_module"].as_str() == Some("task_model")
+            && e["event_type"].as_str() == Some("TaskMarkerUpdated")
+        {
+            if let Some(task_id) = e["payload"]["task_id"].as_str() {
+                if let Some(task) = tasks.iter_mut().find(|t| t.item_id == task_id) {
+                    task.current_marker = e["payload"]["new_marker"].as_str().map(String::from);
                 }
             }
         }
-
-        all.extend(tasks);
     }
+
+    all.extend(tasks);
     Ok(all)
 }
 
 fn current_status(item_id: &str) -> Result<Option<String>> {
-    if !Path::new(EVENTS_FILE).exists() { return Ok(None); }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
     let mut last = None;
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading events file")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         let src = event["source_module"].as_str().unwrap_or("");
         if (src == "item_status" || src == "logseq_sync")
             && event["event_type"].as_str() == Some("ItemStatusUpdated")
@@ -190,13 +148,9 @@ fn current_status(item_id: &str) -> Result<Option<String>> {
 }
 
 fn current_priority(item_id: &str) -> Result<Option<String>> {
-    if !Path::new(EVENTS_FILE).exists() { return Ok(None); }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
     let mut last = None;
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading events file")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         let src = event["source_module"].as_str().unwrap_or("");
         if (src == "item_status" || src == "logseq_sync")
             && event["event_type"].as_str() == Some("ItemPriorityUpdated")
@@ -209,21 +163,13 @@ fn current_priority(item_id: &str) -> Result<Option<String>> {
 }
 
 /// Return the recorded deadline for an item, or None if not set.
-/// Returns None → rendered as "TBD" on Logseq pages.
-/// Future: reads DeadlineUpdated events when pm_structuring and logseq_sync
-/// schema integrations are complete.
 fn current_deadline(_item_id: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
 fn proposed_status_and_priority(item_id: &str) -> Result<(Option<String>, Option<String>)> {
-    if !Path::new(EVENTS_FILE).exists() { return Ok((None, None)); }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
-    let events: Vec<Value> = std::io::BufReader::new(file)
-        .lines()
-        .filter_map(|l| l.ok())
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(&l).ok())
+    let events: Vec<Value> = open_event_log(Path::new(EVENTS_FILE))?
+        .filter_map(|r| r.ok())
         .collect();
 
     let candidate = events.iter().find_map(|e| {
@@ -272,13 +218,9 @@ fn effective_priority(item_id: &str) -> Result<Option<String>> {
 }
 
 fn build_active_links() -> Result<Vec<LinkRecord>> {
-    if !Path::new(EVENTS_FILE).exists() { return Ok(vec![]); }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
     let mut links: Vec<LinkRecord> = Vec::new();
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading events file")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         if event["source_module"].as_str() != Some("item_links") { continue; }
         match event["event_type"].as_str() {
             Some("ItemLinked") => {
@@ -303,7 +245,6 @@ fn build_active_links() -> Result<Vec<LinkRecord>> {
 }
 
 /// Convert a PascalCase or lowercase type name to a Logseq-friendly kebab-case tag.
-/// e.g. "WorkPackage" → "work-package", "task" → "task", "Milestone" → "milestone"
 fn type_to_logseq_tag(type_name: &str) -> String {
     let mut result = String::new();
     for (i, ch) in type_name.chars().enumerate() {
@@ -447,6 +388,7 @@ fn remove_stale_pages(pages_dir: &Path, current_slugs: &[String]) {
 fn cmd_export(output_dir: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
     let events_path = Path::new(EVENTS_FILE);
+    let emitter = EventEmitter::new(events_path, SOURCE_MODULE);
 
     // Load and validate the project vocabulary schema.
     // On failure, project_schema emits the appropriate FAILURE event and returns None.
@@ -455,7 +397,7 @@ fn cmd_export(output_dir: &str) -> Result<()> {
         None => return Ok(()),
     };
 
-    emit_event("ExportRequested", &correlation_id, json!({
+    emitter.emit("ExportRequested", &correlation_id, json!({
         "output_dir": output_dir,
     }));
 
@@ -464,7 +406,7 @@ fn cmd_export(output_dir: &str) -> Result<()> {
         Ok(i) => i,
         Err(e) => {
             eprintln!("Cannot read project record: {:#}", e);
-            emit_event("ExportFailedRecordUnreadable", &correlation_id, json!({
+            emitter.emit("ExportFailedRecordUnreadable", &correlation_id, json!({
                 "failure_reason": "project_record_unreadable",
                 "error_detail": format!("{:#}", e),
             }));
@@ -475,7 +417,7 @@ fn cmd_export(output_dir: &str) -> Result<()> {
     // Contract failure: EmptyProjectRecord
     if items.is_empty() {
         eprintln!("Project record contains no items. Nothing to export.");
-        emit_event("ExportFailedEmptyRecord", &correlation_id, json!({
+        emitter.emit("ExportFailedEmptyRecord", &correlation_id, json!({
             "failure_reason": "empty_project_record",
         }));
         return Ok(());
@@ -486,7 +428,7 @@ fn cmd_export(output_dir: &str) -> Result<()> {
     // Contract failure: OutputDirectoryNotAccessible
     if let Err(e) = fs::create_dir_all(&pages_dir) {
         eprintln!("Cannot create output directory '{}': {:#}", pages_dir.display(), e);
-        emit_event("ExportFailedOutputUnavailable", &correlation_id, json!({
+        emitter.emit("ExportFailedOutputUnavailable", &correlation_id, json!({
             "failure_reason": "output_directory_not_accessible",
             "output_dir": output_dir,
         }));
@@ -494,7 +436,7 @@ fn cmd_export(output_dir: &str) -> Result<()> {
     }
     if !check_output_dir_writable(&pages_dir) {
         eprintln!("Output directory '{}' is not writable.", pages_dir.display());
-        emit_event("ExportFailedOutputUnavailable", &correlation_id, json!({
+        emitter.emit("ExportFailedOutputUnavailable", &correlation_id, json!({
             "failure_reason": "output_directory_not_accessible",
             "output_dir": output_dir,
         }));
@@ -597,7 +539,7 @@ fn cmd_export(output_dir: &str) -> Result<()> {
         if items_excluded > 0 { format!(" ({} excluded: unrecognized type)", items_excluded) } else { String::new() }
     );
 
-    emit_event("ExportCompleted", &correlation_id, json!({
+    emitter.emit("ExportCompleted", &correlation_id, json!({
         "output_dir": output_dir,
         "item_count": item_count,
         "pages_written": pages_written,

@@ -1,19 +1,16 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
+use lucid_core::{open_event_log, EVENTS_FILE};
 use project_schema::{
     emit_schema_failure, is_valid_status, load_schema, resolve_type, validate, EventEnvelope,
     ProjectSchema, SchemaError,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::fs;
-use std::io::BufRead;
 use std::path::Path;
 use uuid::Uuid;
 
 mod suggester;
-
-const EVENTS_FILE: &str = "events/runtime_events.jsonl";
 
 #[derive(Parser)]
 #[command(about = "LucidPM ontology enrichment via AI proposals")]
@@ -52,16 +49,7 @@ fn emit(event_type: &str, source_module: &str, correlation_id: &str, payload: Va
 }
 
 fn read_events() -> Result<Vec<Value>> {
-    if !Path::new(EVENTS_FILE).exists() {
-        return Ok(vec![]);
-    }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
-    Ok(std::io::BufReader::new(file)
-        .lines()
-        .filter_map(|l| l.ok())
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(&l).ok())
-        .collect())
+    Ok(open_event_log(Path::new(EVENTS_FILE))?.filter_map(|r| r.ok()).collect())
 }
 
 fn incorporated_sessions(events: &[Value]) -> Vec<String> {

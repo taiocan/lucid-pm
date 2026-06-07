@@ -16,6 +16,7 @@ anyhow = "1"
 reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 project_schema = { path = "../project_schema" }
+lucid_core = { path = "../lucid_core" }
 
 [dev-dependencies]
 project_schema = { path = "../project_schema", features = ["test-support"] }

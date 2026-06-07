@@ -1,14 +1,13 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use project_schema::{is_block_type, load_and_validate, marker_to_status, resolve_type, EventEnvelope, ProjectSchema};
+use lucid_core::{open_event_log, EventEmitter, RecordedItem, EVENTS_FILE};
+use project_schema::{is_block_type, load_and_validate, marker_to_status, resolve_type, ProjectSchema};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-const EVENTS_FILE: &str = "events/runtime_events.jsonl";
 const SOURCE_MODULE: &str = "logseq_sync";
 
 #[derive(Parser)]
@@ -17,11 +16,6 @@ struct Cli {
     /// Path to the Logseq graph directory (pages must be at <graph_dir>/pages/)
     #[arg(long)]
     graph: String,
-}
-
-struct RecordedItem {
-    item_id: String,
-    item_type: String,
 }
 
 struct TaskRecord {
@@ -52,37 +46,10 @@ fn vocabulary_allows_status(schema: &ProjectSchema, item_type: &str, status: &st
 
 const VALID_PRIORITIES: &[&str] = &["high", "medium", "low"];
 
-fn emit_event(event_type: &str, correlation_id: &str, payload: Value) {
-    project_schema::emit_event(Path::new(EVENTS_FILE), EventEnvelope {
-        source_module: SOURCE_MODULE,
-        event_type,
-        correlation_id,
-        payload,
-    });
-}
-
-/// Emit a task_model event during sync. source_module is "task_model" so that
-/// discovered tasks and marker updates are indistinguishable from direct-command
-/// task_model events (contract indistinguishability invariant).
-fn emit_task_event(event_type: &str, correlation_id: &str, payload: Value) {
-    project_schema::emit_event(Path::new(EVENTS_FILE), EventEnvelope {
-        source_module: "task_model",
-        event_type,
-        correlation_id,
-        payload,
-    });
-}
-
 fn read_incorporated_sessions() -> Result<Vec<String>> {
-    if !Path::new(EVENTS_FILE).exists() {
-        return Ok(vec![]);
-    }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
     let mut sessions = Vec::new();
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading events file")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         if event["source_module"].as_str() == Some("project_state")
             && event["event_type"].as_str() == Some("ItemsIncorporated")
         {
@@ -95,16 +62,11 @@ fn read_incorporated_sessions() -> Result<Vec<String>> {
 }
 
 fn find_confirmed_items(session_id: &str) -> Result<Vec<RecordedItem>> {
-    let file = fs::File::open(EVENTS_FILE)
-        .with_context(|| format!("opening {}", EVENTS_FILE))?;
-
     let mut items_extracted: Option<Vec<Value>> = None;
     let mut accepted_ids: Option<Vec<String>> = None;
 
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading runtime events")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         if event["correlation_id"].as_str() != Some(session_id) { continue; }
 
         match event["event_type"].as_str() {
@@ -133,6 +95,7 @@ fn find_confirmed_items(session_id: &str) -> Result<Vec<RecordedItem>> {
         .map(|item| RecordedItem {
             item_id:   item["item_id"].as_str().unwrap_or("").to_string(),
             item_type: item["item_type"].as_str().unwrap_or("").to_string(),
+            ..Default::default()
         })
         .collect();
 
@@ -146,21 +109,16 @@ fn read_all_record_items() -> Result<Vec<RecordedItem>> {
         all.extend(find_confirmed_items(&sid)?);
     }
     // Task instances
-    if Path::new(EVENTS_FILE).exists() {
-        let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
-        for line in std::io::BufReader::new(file).lines() {
-            let line = line.context("reading events file")?;
-            if line.trim().is_empty() { continue; }
-            let event: Value = serde_json::from_str(&line).context("parsing event line")?;
-            if event["source_module"].as_str() == Some("task_model")
-                && event["event_type"].as_str() == Some("TaskAdded")
-            {
-                let p = &event["payload"];
-                let task_id = p["task_id"].as_str().unwrap_or("").to_string();
-                let item_type = p["item_type"].as_str().unwrap_or("").to_string();
-                if !task_id.is_empty() && !item_type.is_empty() {
-                    all.push(RecordedItem { item_id: task_id, item_type });
-                }
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
+        if event["source_module"].as_str() == Some("task_model")
+            && event["event_type"].as_str() == Some("TaskAdded")
+        {
+            let p = &event["payload"];
+            let task_id = p["task_id"].as_str().unwrap_or("").to_string();
+            let item_type = p["item_type"].as_str().unwrap_or("").to_string();
+            if !task_id.is_empty() && !item_type.is_empty() {
+                all.push(RecordedItem { item_id: task_id, item_type, ..Default::default() });
             }
         }
     }
@@ -169,15 +127,8 @@ fn read_all_record_items() -> Result<Vec<RecordedItem>> {
 
 /// Read all task instances with their current markers.
 fn read_all_task_records() -> Result<Vec<TaskRecord>> {
-    if !Path::new(EVENTS_FILE).exists() {
-        return Ok(vec![]);
-    }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
-    let events: Vec<Value> = std::io::BufReader::new(file)
-        .lines()
-        .filter_map(|l| l.ok())
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(&l).ok())
+    let events: Vec<Value> = open_event_log(Path::new(EVENTS_FILE))?
+        .filter_map(|r| r.ok())
         .collect();
 
     let mut tasks: Vec<TaskRecord> = events.iter()
@@ -249,13 +200,9 @@ fn parse_task_block_lines(content: &str) -> Vec<(String, String, String)> {
 
 /// Most recent explicit status for item_id, from item_status or logseq_sync.
 fn current_explicit_status(item_id: &str) -> Result<Option<String>> {
-    if !Path::new(EVENTS_FILE).exists() { return Ok(None); }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
     let mut last = None;
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading events file")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         let src = event["source_module"].as_str().unwrap_or("");
         if (src == "item_status" || src == "logseq_sync")
             && event["event_type"].as_str() == Some("ItemStatusUpdated")
@@ -269,13 +216,9 @@ fn current_explicit_status(item_id: &str) -> Result<Option<String>> {
 
 /// Most recent explicit priority for item_id, from item_status or logseq_sync.
 fn current_explicit_priority(item_id: &str) -> Result<Option<String>> {
-    if !Path::new(EVENTS_FILE).exists() { return Ok(None); }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
     let mut last = None;
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading events file")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         let src = event["source_module"].as_str().unwrap_or("");
         if (src == "item_status" || src == "logseq_sync")
             && event["event_type"].as_str() == Some("ItemPriorityUpdated")
@@ -289,13 +232,8 @@ fn current_explicit_priority(item_id: &str) -> Result<Option<String>> {
 
 /// Proposed status/priority from a confirmed extraction, if present.
 fn proposed_values(item_id: &str) -> Result<(Option<String>, Option<String>)> {
-    if !Path::new(EVENTS_FILE).exists() { return Ok((None, None)); }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
-    let events: Vec<Value> = std::io::BufReader::new(file)
-        .lines()
-        .filter_map(|l| l.ok())
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(&l).ok())
+    let events: Vec<Value> = open_event_log(Path::new(EVENTS_FILE))?
+        .filter_map(|r| r.ok())
         .collect();
 
     let candidate = events.iter().find_map(|e| {
@@ -393,8 +331,10 @@ fn parse_page_properties(content: &str) -> (Option<String>, Option<String>) {
 
 fn cmd_sync(graph_dir: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
+    let task_emitter = EventEmitter::new(Path::new(EVENTS_FILE), "task_model");
 
-    emit_event("SyncRequested", &correlation_id, json!({
+    emitter.emit("SyncRequested", &correlation_id, json!({
         "graph_dir": graph_dir,
     }));
 
@@ -403,7 +343,7 @@ fn cmd_sync(graph_dir: &str) -> Result<()> {
     let schema = match load_and_validate(Path::new("."), Path::new(EVENTS_FILE), &correlation_id) {
         Some(s) => s,
         None => {
-            emit_event("SyncFailedSchemaInvalid", &correlation_id, json!({
+            emitter.emit("SyncFailedSchemaInvalid", &correlation_id, json!({
                 "failure_reason": "schema_load_failed",
             }));
             return Ok(());
@@ -414,7 +354,7 @@ fn cmd_sync(graph_dir: &str) -> Result<()> {
     let pages_dir = PathBuf::from(graph_dir).join("pages");
     if fs::read_dir(&pages_dir).is_err() {
         eprintln!("Logseq graph not accessible: '{}'", pages_dir.display());
-        emit_event("SyncFailedGraphNotAccessible", &correlation_id, json!({
+        emitter.emit("SyncFailedGraphNotAccessible", &correlation_id, json!({
             "failure_reason": "graph_not_accessible",
             "graph_dir": graph_dir,
         }));
@@ -427,7 +367,7 @@ fn cmd_sync(graph_dir: &str) -> Result<()> {
     // Contract failure: ProjectRecordEmpty
     if items.is_empty() {
         eprintln!("Project record is empty. Nothing to sync.");
-        emit_event("SyncFailedEmptyRecord", &correlation_id, json!({
+        emitter.emit("SyncFailedEmptyRecord", &correlation_id, json!({
             "failure_reason": "empty_project_record",
         }));
         return Ok(());
@@ -461,7 +401,7 @@ fn cmd_sync(graph_dir: &str) -> Result<()> {
                         "Skipping {}: '{}' is not valid for type '{}'",
                         &item.item_id[..8.min(item.item_id.len())], ls, item.item_type
                     );
-                    emit_event("ItemSyncSkippedInvalidStatus", &correlation_id, json!({
+                    emitter.emit("ItemSyncSkippedInvalidStatus", &correlation_id, json!({
                         "failure_reason": "invalid_status_for_type",
                         "item_id":        item.item_id,
                         "item_type":      item.item_type,
@@ -469,7 +409,7 @@ fn cmd_sync(graph_dir: &str) -> Result<()> {
                     }));
                     items_skipped += 1;
                 } else {
-                    emit_event("ItemStatusUpdated", &correlation_id, json!({
+                    emitter.emit("ItemStatusUpdated", &correlation_id, json!({
                         "item_id":         item.item_id,
                         "item_type":       item.item_type,
                         "new_status":      ls,
@@ -489,7 +429,7 @@ fn cmd_sync(graph_dir: &str) -> Result<()> {
             if Some(lp.as_str()) != eff_priority.as_deref() {
                 any_difference = true;
                 if VALID_PRIORITIES.contains(&lp.as_str()) {
-                    emit_event("ItemPriorityUpdated", &correlation_id, json!({
+                    emitter.emit("ItemPriorityUpdated", &correlation_id, json!({
                         "item_id":           item.item_id,
                         "item_type":         item.item_type,
                         "new_priority":      lp,
@@ -537,7 +477,7 @@ fn cmd_sync(graph_dir: &str) -> Result<()> {
                 if let Some(task) = task_records.iter().find(|t| t.task_id == task_id) {
                     if task.current_marker != marker {
                         any_difference = true;
-                        emit_task_event("TaskMarkerUpdated", &correlation_id, json!({
+                        task_emitter.emit("TaskMarkerUpdated", &correlation_id, json!({
                             "task_id":         task_id,
                             "previous_marker": task.current_marker,
                             "new_marker":      marker,
@@ -565,7 +505,7 @@ fn cmd_sync(graph_dir: &str) -> Result<()> {
 
                 if let Some(item_type) = canonical_type {
                     any_difference = true;
-                    emit_task_event("TaskAdded", &correlation_id, json!({
+                    task_emitter.emit("TaskAdded", &correlation_id, json!({
                         "task_id":        task_id,
                         "item_type":      item_type,
                         "description":    description,
@@ -585,7 +525,7 @@ fn cmd_sync(graph_dir: &str) -> Result<()> {
 
     if !any_difference {
         println!("No changes detected. Project record is up to date.");
-        emit_event("SyncCompletedNoChanges", &correlation_id, json!({
+        emitter.emit("SyncCompletedNoChanges", &correlation_id, json!({
             "graph_dir":     graph_dir,
             "items_checked": items.len() as u64,
         }));
@@ -594,7 +534,7 @@ fn cmd_sync(graph_dir: &str) -> Result<()> {
             "Sync complete: {} change(s) applied, {} item(s) skipped.",
             changes_applied, items_skipped
         );
-        emit_event("SyncCompleted", &correlation_id, json!({
+        emitter.emit("SyncCompleted", &correlation_id, json!({
             "graph_dir":       graph_dir,
             "changes_applied": changes_applied,
             "items_skipped":   items_skipped,

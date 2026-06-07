@@ -1,10 +1,9 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use lucid_core::EventEmitter;
 use serde_json::{json, Value};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const SOURCE_MODULE: &str = "multi_project";
@@ -43,30 +42,6 @@ fn default_registry_dir() -> PathBuf {
     std::env::var("HOME")
         .map(|h| PathBuf::from(h).join(".lucidpm"))
         .unwrap_or_else(|_| PathBuf::from(".lucidpm"))
-}
-
-fn timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-}
-
-fn emit_event(events_file: &Path, event_type: &str, correlation_id: &str, payload: Value) {
-    let event = json!({
-        "event_id": Uuid::new_v4().to_string(),
-        "event_type": event_type,
-        "timestamp": timestamp_ms(),
-        "correlation_id": correlation_id,
-        "source_module": SOURCE_MODULE,
-        "payload": payload,
-    });
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(events_file)
-        .expect("Failed to open events file");
-    writeln!(file, "{}", event).expect("Failed to write event");
 }
 
 fn registry_path(registry_dir: &Path) -> PathBuf {
@@ -127,8 +102,9 @@ fn cmd_init(registry_dir: &Path, name: &str, dir: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
     ensure_registry_dir(registry_dir)?;
     let events = events_path(registry_dir);
+    let emitter = EventEmitter::new(&events, SOURCE_MODULE);
 
-    emit_event(&events, "ProjectInitRequested", &correlation_id, json!({
+    emitter.emit("ProjectInitRequested", &correlation_id, json!({
         "project_name": name,
         "project_dir": dir,
     }));
@@ -137,7 +113,7 @@ fn cmd_init(registry_dir: &Path, name: &str, dir: &str) -> Result<()> {
     let mut projects = read_registry(registry_dir)?;
     if projects.iter().any(|(n, _)| n == name) {
         eprintln!("Project '{}' already exists in registry.", name);
-        emit_event(&events, "ProjectInitFailedDuplicate", &correlation_id, json!({
+        emitter.emit("ProjectInitFailedDuplicate", &correlation_id, json!({
             "failure_reason": "project_name_already_exists",
             "project_name": name,
         }));
@@ -148,7 +124,7 @@ fn cmd_init(registry_dir: &Path, name: &str, dir: &str) -> Result<()> {
     let project_path = Path::new(dir);
     if fs::create_dir_all(project_path).is_err() || !check_dir_writable(project_path) {
         eprintln!("Cannot create or write to project directory '{}'.", dir);
-        emit_event(&events, "ProjectInitFailedDirectoryNotAccessible", &correlation_id, json!({
+        emitter.emit("ProjectInitFailedDirectoryNotAccessible", &correlation_id, json!({
             "failure_reason": "directory_not_accessible",
             "project_name": name,
             "project_dir": dir,
@@ -167,7 +143,7 @@ fn cmd_init(registry_dir: &Path, name: &str, dir: &str) -> Result<()> {
     projects.push((name.to_string(), abs_dir.clone()));
     write_registry(registry_dir, &projects)?;
 
-    emit_event(&events, "ProjectInitialized", &correlation_id, json!({
+    emitter.emit("ProjectInitialized", &correlation_id, json!({
         "project_name": name,
         "project_dir": abs_dir,
     }));
@@ -180,8 +156,9 @@ fn cmd_list(registry_dir: &Path) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
     ensure_registry_dir(registry_dir)?;
     let events = events_path(registry_dir);
+    let emitter = EventEmitter::new(&events, SOURCE_MODULE);
 
-    emit_event(&events, "ProjectListRequested", &correlation_id, json!({}));
+    emitter.emit("ProjectListRequested", &correlation_id, json!({}));
 
     let projects = read_registry(registry_dir)?;
     let count = projects.len() as u32;
@@ -197,7 +174,7 @@ fn cmd_list(registry_dir: &Path) -> Result<()> {
         }
     }
 
-    emit_event(&events, "ProjectListReturned", &correlation_id, json!({
+    emitter.emit("ProjectListReturned", &correlation_id, json!({
         "project_count": count,
         "projects": projects_json,
     }));
@@ -209,8 +186,9 @@ fn cmd_open(registry_dir: &Path, name: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
     ensure_registry_dir(registry_dir)?;
     let events = events_path(registry_dir);
+    let emitter = EventEmitter::new(&events, SOURCE_MODULE);
 
-    emit_event(&events, "ProjectOpenRequested", &correlation_id, json!({
+    emitter.emit("ProjectOpenRequested", &correlation_id, json!({
         "project_name": name,
     }));
 
@@ -220,14 +198,14 @@ fn cmd_open(registry_dir: &Path, name: &str) -> Result<()> {
     match projects.iter().find(|(n, _)| n == name) {
         None => {
             eprintln!("Project '{}' not found in registry.", name);
-            emit_event(&events, "ProjectOpenFailedNotFound", &correlation_id, json!({
+            emitter.emit("ProjectOpenFailedNotFound", &correlation_id, json!({
                 "failure_reason": "project_not_found",
                 "project_name": name,
             }));
         }
         Some((_, dir)) => {
             println!("{}", dir);
-            emit_event(&events, "ProjectPathReturned", &correlation_id, json!({
+            emitter.emit("ProjectPathReturned", &correlation_id, json!({
                 "project_name": name,
                 "project_dir": dir,
             }));

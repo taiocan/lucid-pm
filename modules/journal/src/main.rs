@@ -1,13 +1,12 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use lucid_core::{EventEmitter, EVENTS_FILE};
 use serde_json::{json, Value};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const EVENTS_FILE: &str = "events/runtime_events.jsonl";
 const JOURNAL_DIR: &str = "journal";
 const SOURCE_MODULE: &str = "journal";
 
@@ -36,30 +35,6 @@ enum Cmd {
         /// Filename of the entry to open
         filename: String,
     },
-}
-
-fn timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-}
-
-fn emit(event_type: &str, correlation_id: &str, payload: Value) {
-    let event = json!({
-        "event_id":       Uuid::new_v4().to_string(),
-        "event_type":     event_type,
-        "timestamp":      timestamp_ms(),
-        "correlation_id": correlation_id,
-        "source_module":  SOURCE_MODULE,
-        "payload":        payload,
-    });
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(EVENTS_FILE)
-        .expect("Failed to open events file");
-    writeln!(file, "{}", event).expect("Failed to write event");
 }
 
 // Returns "YYYY-MM-DD" from the current system time.
@@ -158,6 +133,7 @@ fn journal_path() -> PathBuf {
 
 fn cmd_new(title: String, ext: String) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
     let date = today_str();
 
     let ext = match ext.trim_start_matches('.') {
@@ -177,15 +153,11 @@ fn cmd_new(title: String, ext: String) -> Result<()> {
         fs::File::create(&file_path).context("creating journal entry file")?;
     }
 
-    emit(
-        "JournalEntryCreated",
-        &correlation_id,
-        json!({
-            "filename":   filename,
-            "title":      effective_title,
-            "created_at": date,
-        }),
-    );
+    emitter.emit("JournalEntryCreated", &correlation_id, json!({
+        "filename":   filename,
+        "title":      effective_title,
+        "created_at": date,
+    }));
 
     let abs = fs::canonicalize(&file_path)
         .unwrap_or_else(|_| file_path.clone());
@@ -196,8 +168,9 @@ fn cmd_new(title: String, ext: String) -> Result<()> {
 
 fn cmd_list() -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
-    emit("JournalListRequested", &correlation_id, json!({}));
+    emitter.emit("JournalListRequested", &correlation_id, json!({}));
 
     let dir = journal_path();
     let mut entries: Vec<Value> = Vec::new();
@@ -231,14 +204,10 @@ fn cmd_list() -> Result<()> {
     }
 
     let entry_count = entries.len() as u64;
-    emit(
-        "JournalListReturned",
-        &correlation_id,
-        json!({
-            "entry_count": entry_count,
-            "entries":     entries.clone(),
-        }),
-    );
+    emitter.emit("JournalListReturned", &correlation_id, json!({
+        "entry_count": entry_count,
+        "entries":     entries.clone(),
+    }));
 
     if entries.is_empty() {
         println!("(no journal entries)");
@@ -257,24 +226,17 @@ fn cmd_list() -> Result<()> {
 
 fn cmd_open(filename: String) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
-    emit(
-        "JournalOpenRequested",
-        &correlation_id,
-        json!({ "filename": filename }),
-    );
+    emitter.emit("JournalOpenRequested", &correlation_id, json!({ "filename": filename }));
 
     let file_path = journal_path().join(&filename);
 
     if !file_path.exists() {
-        emit(
-            "JournalOpenFailedEntryNotFound",
-            &correlation_id,
-            json!({
-                "failure_reason": "entry_not_found",
-                "filename":       filename,
-            }),
-        );
+        emitter.emit("JournalOpenFailedEntryNotFound", &correlation_id, json!({
+            "failure_reason": "entry_not_found",
+            "filename":       filename,
+        }));
         eprintln!("Error: entry '{}' not found.", filename);
         std::process::exit(1);
     }
@@ -283,14 +245,10 @@ fn cmd_open(filename: String) -> Result<()> {
         .unwrap_or_else(|_| file_path.clone());
     let path_str = abs.to_string_lossy().to_string();
 
-    emit(
-        "JournalEntryOpened",
-        &correlation_id,
-        json!({
-            "filename": filename,
-            "path":     path_str.clone(),
-        }),
-    );
+    emitter.emit("JournalEntryOpened", &correlation_id, json!({
+        "filename": filename,
+        "path":     path_str.clone(),
+    }));
 
     println!("{}", path_str);
 

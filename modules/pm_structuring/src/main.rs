@@ -2,24 +2,15 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
-use project_schema::{load_and_validate, EventEnvelope, ProjectSchema};
+use lucid_core::{EventEmitter, EVENTS_FILE};
+use project_schema::{load_and_validate, ProjectSchema};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 mod extractor;
 use extractor::extract_items;
 
-const EVENTS_FILE: &str = "events/runtime_events.jsonl";
 const SOURCE_MODULE: &str = "pm_structuring";
-
-fn emit_event(event_type: &str, correlation_id: &str, payload: Value) {
-    project_schema::emit_event(Path::new(EVENTS_FILE), EventEnvelope {
-        source_module: SOURCE_MODULE,
-        event_type,
-        correlation_id,
-        payload,
-    });
-}
 
 fn has_yes_flag() -> bool {
     std::env::args().any(|a| a == "--yes" || a == "-y")
@@ -58,15 +49,16 @@ fn already_processed_files() -> HashSet<String> {
 // Schema is validated before this function is called; it is passed as a reference.
 async fn run_extraction(source_text: String, source_file: Option<&str>, auto_confirm: bool, schema: &ProjectSchema) {
     let correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
-    emit_event("TextSubmitted", &correlation_id, json!({
+    emitter.emit("TextSubmitted", &correlation_id, json!({
         "source_text": source_text,
         "input_length": source_text.len(),
     }));
 
     if source_text.trim().is_empty() {
         eprintln!("Error: Input text is required.");
-        emit_event("ExtractionFailedEmptyInput", &correlation_id, json!({
+        emitter.emit("ExtractionFailedEmptyInput", &correlation_id, json!({
             "failure_reason": "empty_input",
         }));
         std::process::exit(1);
@@ -76,7 +68,7 @@ async fn run_extraction(source_text: String, source_file: Option<&str>, auto_con
         Ok(items) => items,
         Err(e) => {
             eprintln!("Error: API request failed: {}", e);
-            emit_event("ExtractionFailedApiRequest", &correlation_id, json!({
+            emitter.emit("ExtractionFailedApiRequest", &correlation_id, json!({
                 "failure_reason": "api_request_failed",
                 "error_detail": e.to_string(),
             }));
@@ -86,7 +78,7 @@ async fn run_extraction(source_text: String, source_file: Option<&str>, auto_con
 
     if items.is_empty() {
         println!("No project management elements were found in the provided text.");
-        emit_event("ExtractionFailedNoContent", &correlation_id, json!({
+        emitter.emit("ExtractionFailedNoContent", &correlation_id, json!({
             "failure_reason": "no_extractable_content",
             "source_text_length": source_text.len(),
         }));
@@ -104,7 +96,7 @@ async fn run_extraction(source_text: String, source_file: Option<&str>, auto_con
         "proposed_priority": i.proposed_priority,
     })).collect();
 
-    emit_event("ItemsExtracted", &correlation_id, json!({
+    emitter.emit("ItemsExtracted", &correlation_id, json!({
         "items": items_payload,
         "item_count": items.len(),
         "uncertain_count": uncertain_count,
@@ -141,28 +133,29 @@ async fn run_extraction(source_text: String, source_file: Option<&str>, auto_con
     if confirmed {
         let accepted_ids: Vec<String> = items.iter().map(|i| i.item_id.clone()).collect();
         let accepted_count = accepted_ids.len();
-        emit_event("ExtractionConfirmed", &correlation_id, json!({
+        emitter.emit("ExtractionConfirmed", &correlation_id, json!({
             "accepted_item_ids": accepted_ids,
             "accepted_count": accepted_count,
         }));
         println!("Extraction confirmed. {} items accepted.", accepted_count);
     } else {
-        emit_event("ExtractionRejected", &correlation_id, json!({}));
+        emitter.emit("ExtractionRejected", &correlation_id, json!({}));
         println!("Extraction rejected. No items accepted.");
     }
 }
 
 async fn cmd_folder(folder_path: String, auto_confirm: bool, schema: &ProjectSchema) {
     let folder_correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
-    emit_event("FolderScanRequested", &folder_correlation_id, json!({
+    emitter.emit("FolderScanRequested", &folder_correlation_id, json!({
         "folder_path": folder_path,
         "auto_confirm": auto_confirm,
     }));
 
     if !Path::new(&folder_path).exists() {
         eprintln!("Error: Folder '{}' not found.", folder_path);
-        emit_event("ExtractionFailedFolderNotFound", &folder_correlation_id, json!({
+        emitter.emit("ExtractionFailedFolderNotFound", &folder_correlation_id, json!({
             "failure_reason": "folder_not_found",
             "folder_path": folder_path,
         }));
@@ -215,7 +208,7 @@ async fn cmd_folder(folder_path: String, auto_confirm: bool, schema: &ProjectSch
         }
     }
 
-    emit_event("FolderScanCompleted", &folder_correlation_id, json!({
+    emitter.emit("FolderScanCompleted", &folder_correlation_id, json!({
         "folder_path": folder_path,
         "files_found": files_found,
         "files_skipped": files_skipped,

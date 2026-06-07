@@ -23,7 +23,7 @@ cd LucidPM
 ./install.sh
 ```
 
-This builds all 11 feature binaries in release mode and installs them alongside the `lucid` dispatcher into `~/.local/bin/`. If that directory is not in your `PATH`, the script tells you how to add it.
+This builds all 13 feature binaries in release mode and installs them alongside the `lucid` dispatcher into `~/.local/bin/`. If that directory is not in your `PATH`, the script tells you how to add it.
 
 To install elsewhere:
 ```bash

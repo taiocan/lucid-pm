@@ -1,17 +1,14 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
+use lucid_core::{open_event_log, EventEmitter, EVENTS_FILE};
+use project_schema::{
+    load_and_validate, logseq_forward_label, logseq_inverse_label, resolve_type,
+};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::fs;
-use std::io::BufRead;
 use std::path::Path;
 use uuid::Uuid;
 
-use project_schema::{
-    load_and_validate, logseq_forward_label, logseq_inverse_label, resolve_type, EventEnvelope,
-};
-
-const EVENTS_FILE: &str = "events/runtime_events.jsonl";
 const SOURCE_MODULE: &str = "item_links";
 
 #[derive(Parser)]
@@ -49,26 +46,8 @@ struct LinkRecord {
     target_id: String,
 }
 
-fn emit_event(event_type: &str, correlation_id: &str, payload: Value) {
-    project_schema::emit_event(Path::new(EVENTS_FILE), EventEnvelope {
-        source_module: SOURCE_MODULE,
-        event_type,
-        correlation_id,
-        payload,
-    });
-}
-
 fn read_events() -> Result<Vec<Value>> {
-    if !Path::new(EVENTS_FILE).exists() {
-        return Ok(vec![]);
-    }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
-    Ok(std::io::BufReader::new(file)
-        .lines()
-        .filter_map(|l| l.ok())
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(&l).ok())
-        .collect())
+    Ok(open_event_log(Path::new(EVENTS_FILE))?.filter_map(|r| r.ok()).collect())
 }
 
 fn incorporated_sessions(events: &[Value]) -> Vec<(String, u64)> {
@@ -182,6 +161,7 @@ fn display_item(id: &str, registry: &HashMap<String, (String, String)>) -> Strin
 
 fn cmd_add(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
     // Schema load before any link operation event — abort if schema invalid.
     // project_schema emits the schema failure event and prints to stderr.
@@ -190,7 +170,7 @@ fn cmd_add(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
         None => return Ok(()),
     };
 
-    emit_event("LinkAddRequested", &correlation_id, json!({
+    emitter.emit("LinkAddRequested", &correlation_id, json!({
         "source_id": source_id,
         "link_type": link_type,
         "target_id": target_id,
@@ -205,7 +185,7 @@ fn cmd_add(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
         Some(info) => info,
         None => {
             eprintln!("Item '{}' not found in project record.", source_id);
-            emit_event("LinkFailedItemNotFound", &correlation_id, json!({
+            emitter.emit("LinkFailedItemNotFound", &correlation_id, json!({
                 "failure_reason":  "item_not_found",
                 "operation":       "add",
                 "missing_item_id": source_id,
@@ -219,7 +199,7 @@ fn cmd_add(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
         Some(info) => info,
         None => {
             eprintln!("Item '{}' not found in project record.", target_id);
-            emit_event("LinkFailedItemNotFound", &correlation_id, json!({
+            emitter.emit("LinkFailedItemNotFound", &correlation_id, json!({
                 "failure_reason":  "item_not_found",
                 "operation":       "add",
                 "missing_item_id": target_id,
@@ -234,7 +214,7 @@ fn cmd_add(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
             "Item '{}' has entity type '{}' not recognized by the active vocabulary.",
             source_id, source_type
         );
-        emit_event("LinkFailedItemTypeUnrecognized", &correlation_id, json!({
+        emitter.emit("LinkFailedItemTypeUnrecognized", &correlation_id, json!({
             "failure_reason": "item_type_unrecognized",
             "item_id":        source_id,
             "item_type":      source_type,
@@ -249,7 +229,7 @@ fn cmd_add(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
             "Item '{}' has entity type '{}' not recognized by the active vocabulary.",
             target_id, target_type
         );
-        emit_event("LinkFailedItemTypeUnrecognized", &correlation_id, json!({
+        emitter.emit("LinkFailedItemTypeUnrecognized", &correlation_id, json!({
             "failure_reason": "item_type_unrecognized",
             "item_id":        target_id,
             "item_type":      target_type,
@@ -264,7 +244,7 @@ fn cmd_add(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
             "Relation type '{}' is not defined in the active vocabulary.",
             link_type
         );
-        emit_event("LinkFailedRelationTypeUnrecognized", &correlation_id, json!({
+        emitter.emit("LinkFailedRelationTypeUnrecognized", &correlation_id, json!({
             "failure_reason": "relation_type_unrecognized",
             "relation_type":  link_type,
         }));
@@ -276,7 +256,7 @@ fn cmd_add(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
         l.source_id == source_id && l.link_type == link_type && l.target_id == target_id
     }) {
         eprintln!("Link already exists: {} --[{}]--> {}", source_id, link_type, target_id);
-        emit_event("LinkFailedDuplicateLink", &correlation_id, json!({
+        emitter.emit("LinkFailedDuplicateLink", &correlation_id, json!({
             "failure_reason": "duplicate_link",
             "source_id":      source_id,
             "link_type":      link_type,
@@ -285,7 +265,7 @@ fn cmd_add(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    emit_event("ItemLinked", &correlation_id, json!({
+    emitter.emit("ItemLinked", &correlation_id, json!({
         "source_id":   source_id,
         "source_type": source_type,
         "link_type":   link_type,
@@ -304,6 +284,7 @@ fn cmd_add(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
 
 fn cmd_remove(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
     // Schema load is required by contract: all link commands perform schema validation
     // before execution, even though link removal itself does not use vocabulary data.
@@ -315,7 +296,7 @@ fn cmd_remove(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
         None => return Ok(()),
     };
 
-    emit_event("LinkRemoveRequested", &correlation_id, json!({
+    emitter.emit("LinkRemoveRequested", &correlation_id, json!({
         "source_id": source_id,
         "link_type": link_type,
         "target_id": target_id,
@@ -327,7 +308,7 @@ fn cmd_remove(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
 
     if !registry.contains_key(source_id) {
         eprintln!("Item '{}' not found in project record.", source_id);
-        emit_event("LinkFailedItemNotFound", &correlation_id, json!({
+        emitter.emit("LinkFailedItemNotFound", &correlation_id, json!({
             "failure_reason":  "item_not_found",
             "operation":       "remove",
             "missing_item_id": source_id,
@@ -337,7 +318,7 @@ fn cmd_remove(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
 
     if !registry.contains_key(target_id) {
         eprintln!("Item '{}' not found in project record.", target_id);
-        emit_event("LinkFailedItemNotFound", &correlation_id, json!({
+        emitter.emit("LinkFailedItemNotFound", &correlation_id, json!({
             "failure_reason":  "item_not_found",
             "operation":       "remove",
             "missing_item_id": target_id,
@@ -349,7 +330,7 @@ fn cmd_remove(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
         l.source_id == source_id && l.link_type == link_type && l.target_id == target_id
     }) {
         eprintln!("Link not found: {} --[{}]--> {}", source_id, link_type, target_id);
-        emit_event("LinkFailedLinkNotFound", &correlation_id, json!({
+        emitter.emit("LinkFailedLinkNotFound", &correlation_id, json!({
             "failure_reason": "link_not_found",
             "source_id":      source_id,
             "link_type":      link_type,
@@ -358,7 +339,7 @@ fn cmd_remove(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    emit_event("ItemUnlinked", &correlation_id, json!({
+    emitter.emit("ItemUnlinked", &correlation_id, json!({
         "source_id": source_id,
         "link_type": link_type,
         "target_id": target_id,
@@ -375,6 +356,7 @@ fn cmd_remove(source_id: &str, link_type: &str, target_id: &str) -> Result<()> {
 
 fn cmd_list(item_id: Option<&str>) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
     // Schema load before any link operation event — abort if schema invalid.
     let schema = match load_and_validate(Path::new("."), Path::new(EVENTS_FILE), &correlation_id) {
@@ -382,7 +364,7 @@ fn cmd_list(item_id: Option<&str>) -> Result<()> {
         None => return Ok(()),
     };
 
-    emit_event("LinkListRequested", &correlation_id, json!({
+    emitter.emit("LinkListRequested", &correlation_id, json!({
         "item_id": item_id,
     }));
 
@@ -410,7 +392,7 @@ fn cmd_list(item_id: Option<&str>) -> Result<()> {
         // Exclude links with unrecognized relation types, emitting one
         // LinkRelationTypeUnknown event per excluded link.
         if !schema.relations.contains_key(l.link_type.as_str()) {
-            emit_event("LinkRelationTypeUnknown", &correlation_id, json!({
+            emitter.emit("LinkRelationTypeUnknown", &correlation_id, json!({
                 "source_id": l.source_id,
                 "link_type": l.link_type,
                 "target_id": l.target_id,
@@ -446,7 +428,7 @@ fn cmd_list(item_id: Option<&str>) -> Result<()> {
 
     let link_count = link_entries.len();
 
-    emit_event("LinkListReturned", &correlation_id, json!({
+    emitter.emit("LinkListReturned", &correlation_id, json!({
         "item_id":                         item_id,
         "link_count":                      link_count,
         "links":                           &link_entries,

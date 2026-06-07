@@ -1,13 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
-use project_schema::{canonical_task_block_type, load_and_validate, EventEnvelope};
+use lucid_core::{open_event_log, EventEmitter, EVENTS_FILE};
+use project_schema::{canonical_task_block_type, load_and_validate};
 use serde_json::{json, Value};
-use std::fs;
-use std::io::BufRead;
 use std::path::Path;
 use uuid::Uuid;
 
-const EVENTS_FILE: &str = "events/runtime_events.jsonl";
 const SOURCE_MODULE: &str = "task_model";
 
 #[derive(Parser)]
@@ -34,27 +32,11 @@ enum Commands {
     },
 }
 
-fn emit_event(event_type: &str, correlation_id: &str, payload: Value) {
-    project_schema::emit_event(Path::new(EVENTS_FILE), EventEnvelope {
-        source_module: SOURCE_MODULE,
-        event_type,
-        correlation_id,
-        payload,
-    });
-}
-
 /// Read every item currently in the project record (extraction-based and task instances).
 /// Returns item_ids.
 fn all_record_item_ids() -> Result<Vec<String>> {
-    if !Path::new(EVENTS_FILE).exists() {
-        return Ok(vec![]);
-    }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
-    let events: Vec<Value> = std::io::BufReader::new(file)
-        .lines()
-        .filter_map(|l| l.ok())
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(&l).ok())
+    let events: Vec<Value> = open_event_log(Path::new(EVENTS_FILE))?
+        .filter_map(|r| r.ok())
         .collect();
 
     let mut ids: Vec<String> = Vec::new();
@@ -116,9 +98,10 @@ fn all_record_item_ids() -> Result<Vec<String>> {
 
 fn cmd_add(description: &str, parent_id: &str, requested_marker: Option<&str>) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
     // Emit OBSERVATIONAL event before any validation (contract: TaskAddRequested always first)
-    emit_event("TaskAddRequested", &correlation_id, json!({
+    emitter.emit("TaskAddRequested", &correlation_id, json!({
         "description":     description,
         "parent_item_id":  parent_id,
         "requested_marker": requested_marker,
@@ -129,7 +112,7 @@ fn cmd_add(description: &str, parent_id: &str, requested_marker: Option<&str>) -
     let schema = match load_and_validate(Path::new("."), Path::new(EVENTS_FILE), &correlation_id) {
         Some(s) => s,
         None => {
-            emit_event("TaskAddFailedSchemaInvalid", &correlation_id, json!({
+            emitter.emit("TaskAddFailedSchemaInvalid", &correlation_id, json!({
                 "failure_reason": "schema_invalid",
             }));
             return Ok(());
@@ -142,7 +125,7 @@ fn cmd_add(description: &str, parent_id: &str, requested_marker: Option<&str>) -
         Some(t) => t,
         None => {
             eprintln!("error: active vocabulary defines no task block type");
-            emit_event("TaskAddFailedTaskTypeNotDefined", &correlation_id, json!({
+            emitter.emit("TaskAddFailedTaskTypeNotDefined", &correlation_id, json!({
                 "failure_reason": "task_type_not_defined",
             }));
             return Ok(());
@@ -171,7 +154,7 @@ fn cmd_add(description: &str, parent_id: &str, requested_marker: Option<&str>) -
     let known_ids = all_record_item_ids()?;
     if !known_ids.contains(&parent_id.to_string()) {
         eprintln!("error: parent item '{}' not found in project record", parent_id);
-        emit_event("TaskAddFailedParentNotFound", &correlation_id, json!({
+        emitter.emit("TaskAddFailedParentNotFound", &correlation_id, json!({
             "failure_reason":  "parent_not_found",
             "parent_item_id":  parent_id,
         }));
@@ -181,7 +164,7 @@ fn cmd_add(description: &str, parent_id: &str, requested_marker: Option<&str>) -
     // All preconditions satisfied — create the task instance.
     let task_id = Uuid::new_v4().to_string();
 
-    emit_event("TaskAdded", &correlation_id, json!({
+    emitter.emit("TaskAdded", &correlation_id, json!({
         "task_id":         task_id,
         "item_type":       canonical_type,
         "description":     description,

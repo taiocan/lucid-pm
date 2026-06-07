@@ -1,13 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
-use project_schema::{is_block_type, load_and_validate, marker_to_status, resolve_type, EventEnvelope, ProjectSchema};
+use lucid_core::{open_event_log, EventEmitter, RecordedItem, EVENTS_FILE};
+use project_schema::{is_block_type, load_and_validate, marker_to_status, resolve_type, ProjectSchema};
 use serde_json::{json, Value};
-use std::fs;
-use std::io::BufRead;
 use std::path::Path;
 use uuid::Uuid;
 
-const EVENTS_FILE: &str = "events/runtime_events.jsonl";
 const SOURCE_MODULE: &str = "item_status";
 
 #[derive(Parser)]
@@ -38,13 +36,6 @@ enum Commands {
         /// Item ID from the project record
         item_id: String,
     },
-}
-
-#[derive(Clone)]
-struct RecordedItem {
-    item_id: String,
-    item_type: String,
-    description: String,
 }
 
 const VALID_PRIORITIES: &[&str] = &["high", "medium", "low"];
@@ -84,25 +75,10 @@ fn extract_marker(text: &str) -> Option<String> {
     text.split_whitespace().next().map(String::from)
 }
 
-fn emit_event(event_type: &str, correlation_id: &str, payload: Value) {
-    project_schema::emit_event(Path::new(EVENTS_FILE), EventEnvelope {
-        source_module: SOURCE_MODULE,
-        event_type,
-        correlation_id,
-        payload,
-    });
-}
-
 fn read_incorporated_sessions() -> Result<Vec<String>> {
-    if !Path::new(EVENTS_FILE).exists() {
-        return Ok(vec![]);
-    }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
     let mut sessions = Vec::new();
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading events file")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         if event["source_module"].as_str() == Some("project_state")
             && event["event_type"].as_str() == Some("ItemsIncorporated")
         {
@@ -115,16 +91,11 @@ fn read_incorporated_sessions() -> Result<Vec<String>> {
 }
 
 fn find_confirmed_items(session_id: &str) -> Result<Vec<RecordedItem>> {
-    let file = fs::File::open(EVENTS_FILE)
-        .with_context(|| format!("opening {}", EVENTS_FILE))?;
-
     let mut items_extracted: Option<Vec<Value>> = None;
     let mut accepted_ids: Option<Vec<String>> = None;
 
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading runtime events")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         if event["correlation_id"].as_str() != Some(session_id) { continue; }
 
         match event["event_type"].as_str() {
@@ -154,6 +125,7 @@ fn find_confirmed_items(session_id: &str) -> Result<Vec<RecordedItem>> {
             item_id: item["item_id"].as_str().unwrap_or("").to_string(),
             item_type: item["item_type"].as_str().unwrap_or("").to_string(),
             description: item["description"].as_str().unwrap_or("").to_string(),
+            ..Default::default()
         })
         .collect();
 
@@ -167,25 +139,21 @@ fn read_all_record_items() -> Result<Vec<RecordedItem>> {
         all.extend(find_confirmed_items(&sid)?);
     }
     // Task instances from TaskAdded events
-    if Path::new(EVENTS_FILE).exists() {
-        let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
-        for line in std::io::BufReader::new(file).lines() {
-            let line = line.context("reading events file")?;
-            if line.trim().is_empty() { continue; }
-            let event: Value = serde_json::from_str(&line).context("parsing event line")?;
-            if event["source_module"].as_str() == Some("task_model")
-                && event["event_type"].as_str() == Some("TaskAdded")
-            {
-                let p = &event["payload"];
-                let task_id = p["task_id"].as_str().unwrap_or("").to_string();
-                let item_type = p["item_type"].as_str().unwrap_or("").to_string();
-                if !task_id.is_empty() && !item_type.is_empty() {
-                    all.push(RecordedItem {
-                        item_id: task_id,
-                        item_type,
-                        description: p["description"].as_str().unwrap_or("").to_string(),
-                    });
-                }
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
+        if event["source_module"].as_str() == Some("task_model")
+            && event["event_type"].as_str() == Some("TaskAdded")
+        {
+            let p = &event["payload"];
+            let task_id = p["task_id"].as_str().unwrap_or("").to_string();
+            let item_type = p["item_type"].as_str().unwrap_or("").to_string();
+            if !task_id.is_empty() && !item_type.is_empty() {
+                all.push(RecordedItem {
+                    item_id: task_id,
+                    item_type,
+                    description: p["description"].as_str().unwrap_or("").to_string(),
+                    ..Default::default()
+                });
             }
         }
     }
@@ -195,13 +163,9 @@ fn read_all_record_items() -> Result<Vec<RecordedItem>> {
 /// Read the current marker for a task instance: latest TaskMarkerUpdated.new_marker,
 /// falling back to TaskAdded.initial_marker if no update exists.
 fn current_task_marker(task_id: &str) -> Result<Option<String>> {
-    if !Path::new(EVENTS_FILE).exists() { return Ok(None); }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
     let mut current: Option<String> = None;
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading events file")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         if event["source_module"].as_str() != Some("task_model") { continue; }
         match event["event_type"].as_str() {
             Some("TaskAdded")
@@ -225,13 +189,9 @@ fn find_item(item_id: &str) -> Result<Option<RecordedItem>> {
 }
 
 fn current_status(item_id: &str) -> Result<Option<String>> {
-    if !Path::new(EVENTS_FILE).exists() { return Ok(None); }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
     let mut last = None;
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading events file")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         let src = event["source_module"].as_str().unwrap_or("");
         if (src == SOURCE_MODULE || src == "logseq_sync")
             && event["event_type"].as_str() == Some("ItemStatusUpdated")
@@ -244,13 +204,9 @@ fn current_status(item_id: &str) -> Result<Option<String>> {
 }
 
 fn current_priority(item_id: &str) -> Result<Option<String>> {
-    if !Path::new(EVENTS_FILE).exists() { return Ok(None); }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
     let mut last = None;
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading events file")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         let src = event["source_module"].as_str().unwrap_or("");
         if (src == SOURCE_MODULE || src == "logseq_sync")
             && event["event_type"].as_str() == Some("ItemPriorityUpdated")
@@ -263,14 +219,8 @@ fn current_priority(item_id: &str) -> Result<Option<String>> {
 }
 
 fn proposed_values_from_extraction(item_id: &str) -> Result<(Option<String>, Option<String>)> {
-    if !Path::new(EVENTS_FILE).exists() { return Ok((None, None)); }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
-    let events: Vec<Value> = std::io::BufReader::new(file)
-        .lines()
-        .filter_map(|l| l.ok())
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(&l).ok())
-        .collect();
+    let events: Vec<Value> = open_event_log(Path::new(EVENTS_FILE))?
+        .collect::<Result<Vec<_>>>()?;
 
     let candidate = events.iter().find_map(|e| {
         if e["source_module"].as_str() != Some("pm_structuring") { return None; }
@@ -309,6 +259,7 @@ fn proposed_values_from_extraction(item_id: &str) -> Result<(Option<String>, Opt
 
 fn cmd_set_status(item_id: &str, status: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
     // Schema load before any item_status event — abort if schema invalid (FP1: SchemaInvalid).
     // project_schema emits the failure event and prints to stderr.
@@ -317,7 +268,7 @@ fn cmd_set_status(item_id: &str, status: &str) -> Result<()> {
         None => return Ok(()),
     };
 
-    emit_event("StatusUpdateRequested", &correlation_id, json!({
+    emitter.emit("StatusUpdateRequested", &correlation_id, json!({
         "item_id": item_id,
         "requested_status": status,
     }));
@@ -327,7 +278,7 @@ fn cmd_set_status(item_id: &str, status: &str) -> Result<()> {
         Some(i) => i,
         None => {
             println!("Item '{}' not found in project record.", item_id);
-            emit_event("StatusUpdateFailedItemNotFound", &correlation_id, json!({
+            emitter.emit("StatusUpdateFailedItemNotFound", &correlation_id, json!({
                 "failure_reason": "item_not_found",
                 "item_id": item_id,
             }));
@@ -348,7 +299,7 @@ fn cmd_set_status(item_id: &str, status: &str) -> Result<()> {
             "Status '{}' is not valid for item type '{}'. Valid values: {}",
             status, item.item_type, valid_display
         );
-        emit_event("StatusUpdateFailedInvalidStatus", &correlation_id, json!({
+        emitter.emit("StatusUpdateFailedInvalidStatus", &correlation_id, json!({
             "failure_reason": "invalid_status_for_type",
             "item_id": item_id,
             "item_type": item.item_type,
@@ -359,7 +310,7 @@ fn cmd_set_status(item_id: &str, status: &str) -> Result<()> {
 
     let previous_status = current_status(item_id)?;
 
-    emit_event("ItemStatusUpdated", &correlation_id, json!({
+    emitter.emit("ItemStatusUpdated", &correlation_id, json!({
         "item_id": item_id,
         "item_type": item.item_type,
         "new_status": status,
@@ -378,6 +329,7 @@ fn cmd_set_status(item_id: &str, status: &str) -> Result<()> {
 
 fn cmd_set_priority(item_id: &str, priority: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
     // Schema load before any item_status event — abort if schema invalid (FP1: SchemaInvalid).
     // Priority values are not schema-driven in this release, but schema load is required
@@ -387,7 +339,7 @@ fn cmd_set_priority(item_id: &str, priority: &str) -> Result<()> {
         None => return Ok(()),
     };
 
-    emit_event("PriorityUpdateRequested", &correlation_id, json!({
+    emitter.emit("PriorityUpdateRequested", &correlation_id, json!({
         "item_id": item_id,
         "requested_priority": priority,
     }));
@@ -397,7 +349,7 @@ fn cmd_set_priority(item_id: &str, priority: &str) -> Result<()> {
         Some(i) => i,
         None => {
             println!("Item '{}' not found in project record.", item_id);
-            emit_event("PriorityUpdateFailedItemNotFound", &correlation_id, json!({
+            emitter.emit("PriorityUpdateFailedItemNotFound", &correlation_id, json!({
                 "failure_reason": "item_not_found",
                 "item_id": item_id,
             }));
@@ -412,7 +364,7 @@ fn cmd_set_priority(item_id: &str, priority: &str) -> Result<()> {
             priority,
             VALID_PRIORITIES.join(", ")
         );
-        emit_event("PriorityUpdateFailedInvalidValue", &correlation_id, json!({
+        emitter.emit("PriorityUpdateFailedInvalidValue", &correlation_id, json!({
             "failure_reason": "invalid_priority_value",
             "item_id": item_id,
             "requested_priority": priority,
@@ -422,7 +374,7 @@ fn cmd_set_priority(item_id: &str, priority: &str) -> Result<()> {
 
     let previous_priority = current_priority(item_id)?;
 
-    emit_event("ItemPriorityUpdated", &correlation_id, json!({
+    emitter.emit("ItemPriorityUpdated", &correlation_id, json!({
         "item_id": item_id,
         "new_priority": priority,
         "previous_priority": previous_priority,
@@ -440,6 +392,7 @@ fn cmd_set_priority(item_id: &str, priority: &str) -> Result<()> {
 
 fn cmd_get(item_id: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
     // Schema load before any item_status event — abort if schema invalid (FP1: SchemaInvalid).
     // Schema is required for marker resolution and stale-status detection.
@@ -448,7 +401,7 @@ fn cmd_get(item_id: &str) -> Result<()> {
         None => return Ok(()),
     };
 
-    emit_event("ItemStatusQueried", &correlation_id, json!({
+    emitter.emit("ItemStatusQueried", &correlation_id, json!({
         "item_id": item_id,
     }));
 
@@ -457,7 +410,7 @@ fn cmd_get(item_id: &str) -> Result<()> {
         Some(i) => i,
         None => {
             println!("Item '{}' not found in project record.", item_id);
-            emit_event("ItemStatusQueryFailedItemNotFound", &correlation_id, json!({
+            emitter.emit("ItemStatusQueryFailedItemNotFound", &correlation_id, json!({
                 "failure_reason": "item_not_found",
                 "item_id": item_id,
             }));
@@ -503,7 +456,7 @@ fn cmd_get(item_id: &str) -> Result<()> {
     if status_source == Some("explicit") {
         if let Some(ref s) = effective_status {
             if !vocabulary_allows_status(&schema, &item.item_type, s) {
-                emit_event("ItemStatusUnrecognized", &correlation_id, json!({
+                emitter.emit("ItemStatusUnrecognized", &correlation_id, json!({
                     "item_id": item_id,
                     "item_type": item.item_type,
                     "recorded_status": s,
@@ -519,10 +472,10 @@ fn cmd_get(item_id: &str) -> Result<()> {
     let effective_priority = explicit_priority.as_ref().or(prop_priority.as_ref()).cloned();
 
     let status_display = match status_source {
-        Some("explicit")      => effective_status.as_deref().unwrap_or("(not set)").to_string(),
+        Some("explicit")       => effective_status.as_deref().unwrap_or("(not set)").to_string(),
         Some("marker_derived") => format!("{} (marker)", effective_status.as_deref().unwrap_or("")),
-        Some("proposed")      => format!("{} (proposed)", effective_status.as_deref().unwrap_or("")),
-        _                     => "(not set)".to_string(),
+        Some("proposed")       => format!("{} (proposed)", effective_status.as_deref().unwrap_or("")),
+        _                      => "(not set)".to_string(),
     };
     let priority_display = match explicit_priority.as_deref() {
         Some(p) => p.to_string(),
@@ -541,7 +494,7 @@ fn cmd_get(item_id: &str) -> Result<()> {
         priority_display,
     );
 
-    emit_event("ItemStatusReturned", &correlation_id, json!({
+    emitter.emit("ItemStatusReturned", &correlation_id, json!({
         "item_id": item_id,
         "item_type": item.item_type,
         "current_status": effective_status,

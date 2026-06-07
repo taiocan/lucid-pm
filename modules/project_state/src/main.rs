@@ -1,14 +1,11 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use project_schema::{emit_type_unknown, load_and_validate, resolve_type, EventEnvelope};
-use serde::{Deserialize, Serialize};
+use lucid_core::{open_event_log, EventEmitter, RecordedItem, EVENTS_FILE};
+use project_schema::{emit_type_unknown, load_and_validate, resolve_type};
 use serde_json::{json, Value};
-use std::fs;
-use std::io::BufRead;
 use std::path::Path;
 use uuid::Uuid;
 
-const EVENTS_FILE: &str = "events/runtime_events.jsonl";
 const SOURCE_MODULE: &str = "project_state";
 
 #[derive(Parser)]
@@ -29,38 +26,12 @@ enum Commands {
     View,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-struct RecordedItem {
-    item_id: String,
-    item_type: String,
-    description: String,
-    uncertain: bool,
-    uncertainty_reason: Option<String>,
-    session_id: String,
-    parent_item_id: Option<String>,
-}
-
-fn emit_event(event_type: &str, correlation_id: &str, payload: Value) {
-    project_schema::emit_event(Path::new(EVENTS_FILE), EventEnvelope {
-        source_module: SOURCE_MODULE,
-        event_type,
-        correlation_id,
-        payload,
-    });
-}
-
 /// Scan runtime_events.jsonl for all ItemsIncorporated events from project_state.
 /// Returns (session_id, incorporated_count) in emission order.
 fn read_incorporated_sessions() -> Result<Vec<(String, u64)>> {
-    if !std::path::Path::new(EVENTS_FILE).exists() {
-        return Ok(vec![]);
-    }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
     let mut sessions = Vec::new();
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading events file")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         if event["source_module"].as_str() == Some("project_state")
             && event["event_type"].as_str() == Some("ItemsIncorporated")
         {
@@ -75,17 +46,11 @@ fn read_incorporated_sessions() -> Result<Vec<(String, u64)>> {
 
 // Reads runtime_events.jsonl to find ItemsExtracted + ExtractionConfirmed for a session.
 fn find_confirmed_items(session_id: &str) -> Result<Vec<RecordedItem>> {
-    let file = fs::File::open(EVENTS_FILE)
-        .with_context(|| format!("opening {}", EVENTS_FILE))?;
-
     let mut items_extracted: Option<Vec<Value>> = None;
     let mut accepted_ids: Option<Vec<String>> = None;
 
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading runtime events")?;
-        if line.trim().is_empty() { continue; }
-
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event.context("reading runtime events")?;
         if event["correlation_id"].as_str() != Some(session_id) { continue; }
 
         match event["event_type"].as_str() {
@@ -125,7 +90,7 @@ fn find_confirmed_items(session_id: &str) -> Result<Vec<RecordedItem>> {
             uncertain: item["uncertain"].as_bool().unwrap_or(false),
             uncertainty_reason: item["uncertainty_reason"].as_str().map(String::from),
             session_id: session_id.to_string(),
-            parent_item_id: None,
+            ..Default::default()
         })
         .collect();
 
@@ -134,15 +99,9 @@ fn find_confirmed_items(session_id: &str) -> Result<Vec<RecordedItem>> {
 
 /// Read task instances from TaskAdded events in the event log.
 fn read_task_items() -> Result<Vec<RecordedItem>> {
-    if !Path::new(EVENTS_FILE).exists() {
-        return Ok(vec![]);
-    }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
     let mut items = Vec::new();
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.context("reading events file")?;
-        if line.trim().is_empty() { continue; }
-        let event: Value = serde_json::from_str(&line).context("parsing event line")?;
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
         if event["source_module"].as_str() == Some("task_model")
             && event["event_type"].as_str() == Some("TaskAdded")
         {
@@ -154,10 +113,9 @@ fn read_task_items() -> Result<Vec<RecordedItem>> {
                 item_id: task_id,
                 item_type,
                 description: p["description"].as_str().unwrap_or("").to_string(),
-                uncertain: false,
-                uncertainty_reason: None,
                 session_id: "task_model".to_string(),
                 parent_item_id: p["parent_item_id"].as_str().map(String::from),
+                ..Default::default()
             });
         }
     }
@@ -166,8 +124,9 @@ fn read_task_items() -> Result<Vec<RecordedItem>> {
 
 fn cmd_incorporate(session_id: &str) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
-    emit_event("IncorporationRequested", &correlation_id, json!({
+    emitter.emit("IncorporationRequested", &correlation_id, json!({
         "session_id": session_id,
     }));
 
@@ -176,7 +135,7 @@ fn cmd_incorporate(session_id: &str) -> Result<()> {
     // Contract failure: SessionAlreadyIncorporated
     if prior_sessions.iter().any(|(s, _)| s == session_id) {
         println!("Session '{}' has already been incorporated.", session_id);
-        emit_event("IncorporationFailedDuplicate", &correlation_id, json!({
+        emitter.emit("IncorporationFailedDuplicate", &correlation_id, json!({
             "failure_reason": "session_already_incorporated",
             "session_id": session_id,
         }));
@@ -189,7 +148,7 @@ fn cmd_incorporate(session_id: &str) -> Result<()> {
     let total_record_size = prior_total + incorporated_count;
     let total_sessions = prior_sessions.len() + 1;
 
-    emit_event("ItemsIncorporated", &correlation_id, json!({
+    emitter.emit("ItemsIncorporated", &correlation_id, json!({
         "session_id": session_id,
         "incorporated_count": incorporated_count,
         "total_record_size": total_record_size,
@@ -211,15 +170,16 @@ fn cmd_incorporate(session_id: &str) -> Result<()> {
 
 fn cmd_view() -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
-    emit_event("RecordQueried", &correlation_id, json!({}));
+    emitter.emit("RecordQueried", &correlation_id, json!({}));
 
     // Contract failure: SchemaLoadFailed (R10)
     // load_and_validate emits cross-module project_schema events on error.
     let schema = match load_and_validate(Path::new("."), Path::new(EVENTS_FILE), &correlation_id) {
         Some(s) => s,
         None => {
-            emit_event("RecordQueryFailedSchemaInvalid", &correlation_id, json!({
+            emitter.emit("RecordQueryFailedSchemaInvalid", &correlation_id, json!({
                 "failure_reason": "schema_load_failed",
             }));
             return Ok(());
@@ -232,7 +192,7 @@ fn cmd_view() -> Result<()> {
     // Contract failure: EmptyRecord — no items of any kind in the project record
     if sessions.is_empty() && task_items.is_empty() {
         println!("The project record is empty. Run 'incorporate <session_id>' to add items.");
-        emit_event("RecordQueryFailedEmpty", &correlation_id, json!({
+        emitter.emit("RecordQueryFailedEmpty", &correlation_id, json!({
             "failure_reason": "record_empty",
         }));
         return Ok(());
@@ -292,7 +252,7 @@ fn cmd_view() -> Result<()> {
         "parent_item_id": i.parent_item_id,
     })).collect();
 
-    emit_event("RecordReturned", &correlation_id, json!({
+    emitter.emit("RecordReturned", &correlation_id, json!({
         "items": items_payload,
         "total_count": total_count,  // total in record (pre-exclusion)
         "session_count": session_count,

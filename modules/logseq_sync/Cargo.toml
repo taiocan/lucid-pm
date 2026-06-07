@@ -14,6 +14,7 @@ uuid = { version = "1", features = ["v4"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 project_schema = { path = "../project_schema" }
+lucid_core = { path = "../lucid_core" }
 
 [dev-dependencies]
 project_schema = { path = "../project_schema", features = ["test-support"] }

@@ -2,6 +2,7 @@
 members = [
     "demo",
     "item_links",
+    "lucid_core",
     "item_status",
     "journal",
     "logseq_export",

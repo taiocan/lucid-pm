@@ -1,13 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
-use project_schema::{all_status_names, emit_type_unknown, is_block_type, load_and_validate, marker_to_status, resolve_type, EventEnvelope, ProjectSchema};
+use lucid_core::{open_event_log, EventEmitter, EVENTS_FILE};
+use project_schema::{all_status_names, emit_type_unknown, is_block_type, load_and_validate, marker_to_status, resolve_type, ProjectSchema};
 use serde_json::{json, Value};
-use std::fs;
-use std::io::BufRead;
 use std::path::Path;
 use uuid::Uuid;
 
-const EVENTS_FILE: &str = "events/runtime_events.jsonl";
 const SOURCE_MODULE: &str = "priority_view";
 
 const VALID_PRIORITIES: &[&str] = &["high", "medium", "low"];
@@ -32,15 +30,6 @@ struct ItemSummary {
     priority: Option<String>,
 }
 
-fn emit_event(event_type: &str, correlation_id: &str, payload: Value) {
-    project_schema::emit_event(Path::new(EVENTS_FILE), EventEnvelope {
-        source_module: SOURCE_MODULE,
-        event_type,
-        correlation_id,
-        payload,
-    });
-}
-
 fn priority_rank(priority: Option<&str>) -> u8 {
     match priority {
         Some("high")   => 1,
@@ -63,16 +52,7 @@ fn status_rank(status: Option<&str>) -> u8 {
 }
 
 fn read_events() -> Result<Vec<Value>> {
-    if !Path::new(EVENTS_FILE).exists() {
-        return Ok(vec![]);
-    }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
-    Ok(std::io::BufReader::new(file)
-        .lines()
-        .filter_map(|l| l.ok())
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(&l).ok())
-        .collect())
+    Ok(open_event_log(Path::new(EVENTS_FILE))?.filter_map(|r| r.ok()).collect())
 }
 
 fn incorporated_sessions(events: &[Value]) -> Vec<String> {
@@ -229,6 +209,7 @@ fn cmd_view(
     filter_priority: Option<&str>,
 ) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
     // Schema load before any priority_view event — abort if schema invalid (FP1: SchemaInvalid).
     // project_schema emits the failure event and prints to stderr.
@@ -237,7 +218,7 @@ fn cmd_view(
         None => return Ok(()),
     };
 
-    emit_event("PriorityViewRequested", &correlation_id, json!({
+    emitter.emit("PriorityViewRequested", &correlation_id, json!({
         "filter_type":     filter_type,
         "filter_status":   filter_status,
         "filter_priority": filter_priority,
@@ -275,7 +256,7 @@ fn cmd_view(
     // Contract failure: EmptyRecord (project record empty before any exclusion).
     if all_items.is_empty() {
         eprintln!("No items in project record.");
-        emit_event("PriorityViewFailedEmptyRecord", &correlation_id, json!({
+        emitter.emit("PriorityViewFailedEmptyRecord", &correlation_id, json!({
             "failure_reason": "empty_record",
         }));
         return Ok(());
@@ -286,7 +267,7 @@ fn cmd_view(
     if let Some(t) = filter_type {
         if resolve_type(&schema, t).is_none() {
             eprintln!("Invalid --type '{}'. Value is not recognized by the active vocabulary.", t);
-            emit_event("PriorityViewFailedInvalidFilter", &correlation_id, json!({
+            emitter.emit("PriorityViewFailedInvalidFilter", &correlation_id, json!({
                 "failure_reason": "invalid_filter",
                 "filter_field":   "type",
                 "filter_value":   t,
@@ -297,7 +278,7 @@ fn cmd_view(
     if let Some(s) = filter_status {
         if !status_in_vocabulary(&schema, s) {
             eprintln!("Invalid --status '{}'. Value is not in the active vocabulary.", s);
-            emit_event("PriorityViewFailedInvalidFilter", &correlation_id, json!({
+            emitter.emit("PriorityViewFailedInvalidFilter", &correlation_id, json!({
                 "failure_reason": "invalid_filter",
                 "filter_field":   "status",
                 "filter_value":   s,
@@ -308,7 +289,7 @@ fn cmd_view(
     if let Some(p) = filter_priority {
         if !VALID_PRIORITIES.contains(&p) {
             eprintln!("Invalid --priority '{}'. Valid values: {}", p, VALID_PRIORITIES.join(", "));
-            emit_event("PriorityViewFailedInvalidFilter", &correlation_id, json!({
+            emitter.emit("PriorityViewFailedInvalidFilter", &correlation_id, json!({
                 "failure_reason": "invalid_filter",
                 "filter_field":   "priority",
                 "filter_value":   p,
@@ -362,7 +343,7 @@ fn cmd_view(
 
     let item_count = summaries.len();
 
-    emit_event("PriorityViewReturned", &correlation_id, json!({
+    emitter.emit("PriorityViewReturned", &correlation_id, json!({
         "item_count": item_count,
         "filters_applied": {
             "type":     filter_type,

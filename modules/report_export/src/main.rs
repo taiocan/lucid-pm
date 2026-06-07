@@ -1,15 +1,14 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use project_schema::{emit_type_unknown, load_and_validate, resolve_type, EventEnvelope, ProjectSchema};
+use lucid_core::{open_event_log, EventEmitter, EVENTS_FILE};
+use project_schema::{emit_type_unknown, load_and_validate, resolve_type, ProjectSchema};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
-use std::io::BufRead;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const EVENTS_FILE: &str = "events/runtime_events.jsonl";
 const SOURCE_MODULE: &str = "report_export";
 const VALID_TYPES: &[&str] = &["weekly", "risk-register", "stakeholders", "full"];
 
@@ -55,26 +54,8 @@ fn format_date(ms: u64) -> String {
     format!("{:04}-{:02}-{:02}", year, month, day)
 }
 
-fn emit_event(event_type: &str, correlation_id: &str, payload: Value) {
-    project_schema::emit_event(Path::new(EVENTS_FILE), EventEnvelope {
-        source_module: SOURCE_MODULE,
-        event_type,
-        correlation_id,
-        payload,
-    });
-}
-
 fn read_events() -> Result<Vec<Value>> {
-    if !Path::new(EVENTS_FILE).exists() {
-        return Ok(vec![]);
-    }
-    let file = fs::File::open(EVENTS_FILE).context("opening events file")?;
-    Ok(std::io::BufReader::new(file)
-        .lines()
-        .filter_map(|l| l.ok())
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(&l).ok())
-        .collect())
+    Ok(open_event_log(Path::new(EVENTS_FILE))?.filter_map(|r| r.ok()).collect())
 }
 
 fn incorporated_sessions(events: &[Value]) -> Vec<(String, u64)> {
@@ -414,6 +395,7 @@ fn report_filename(report_type: &str) -> &'static str {
 fn cmd_report(report_type: &str, graph_path: Option<&str>) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
     let now_ms = timestamp_ms();
+    let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
     // Vocabulary loading gate: occurs before ReportRequested.
     // On parse/validation failure, project_schema emits the error event and we exit.
@@ -422,7 +404,7 @@ fn cmd_report(report_type: &str, graph_path: Option<&str>) -> Result<()> {
         None    => return Ok(()),
     };
 
-    emit_event("ReportRequested", &correlation_id, json!({
+    emitter.emit("ReportRequested", &correlation_id, json!({
         "report_type": report_type,
         "graph_path":  graph_path,
     }));
@@ -430,7 +412,7 @@ fn cmd_report(report_type: &str, graph_path: Option<&str>) -> Result<()> {
     // Contract failure: InvalidReportType
     if !VALID_TYPES.contains(&report_type) {
         eprintln!("Invalid --type '{}'. Valid values: {}", report_type, VALID_TYPES.join(", "));
-        emit_event("ReportFailedInvalidType", &correlation_id, json!({
+        emitter.emit("ReportFailedInvalidType", &correlation_id, json!({
             "failure_reason": "invalid_report_type",
             "report_type":    report_type,
         }));
@@ -443,7 +425,7 @@ fn cmd_report(report_type: &str, graph_path: Option<&str>) -> Result<()> {
     // Contract failure: EmptyRecord — fires before any vocabulary exclusion is applied.
     if items.is_empty() {
         eprintln!("No items in project record.");
-        emit_event("ReportFailedEmptyRecord", &correlation_id, json!({
+        emitter.emit("ReportFailedEmptyRecord", &correlation_id, json!({
             "failure_reason": "empty_record",
         }));
         return Ok(());
@@ -453,7 +435,7 @@ fn cmd_report(report_type: &str, graph_path: Option<&str>) -> Result<()> {
     if let Some(gp) = graph_path {
         if !Path::new(gp).is_dir() {
             eprintln!("Graph path '{}' does not exist or is not a directory.", gp);
-            emit_event("ReportFailedOutputNotFound", &correlation_id, json!({
+            emitter.emit("ReportFailedOutputNotFound", &correlation_id, json!({
                 "failure_reason": "output_not_found",
                 "graph_path":     gp,
             }));
@@ -498,7 +480,7 @@ fn cmd_report(report_type: &str, graph_path: Option<&str>) -> Result<()> {
         ("stdout".to_string(), None)
     };
 
-    emit_event("ReportGenerated", &correlation_id, json!({
+    emitter.emit("ReportGenerated", &correlation_id, json!({
         "report_type":        report_type,
         "output_destination": output_destination,
         "report_file":        report_file,

@@ -387,7 +387,7 @@ fn test_related_to_label_is_symmetric() {
         (ITEM_TASK, "task", DESC_TASK),
         (ITEM_RISK, "risk", DESC_RISK),
     ]);
-    seed_link_event(&dir, ITEM_TASK, "task", "related_to", ITEM_RISK, "risk");
+    seed_link_event(&dir, ITEM_TASK, "task", "relatedTo", ITEM_RISK, "risk");
 
     let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
     run_export(&dir, &output_dir);
