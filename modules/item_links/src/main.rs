@@ -2,14 +2,13 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, Write};
+use std::fs;
+use std::io::BufRead;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use project_schema::{
-    load_and_validate, logseq_forward_label, logseq_inverse_label, resolve_type,
+    load_and_validate, logseq_forward_label, logseq_inverse_label, resolve_type, EventEnvelope,
 };
 
 const EVENTS_FILE: &str = "events/runtime_events.jsonl";
@@ -50,28 +49,13 @@ struct LinkRecord {
     target_id: String,
 }
 
-fn timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-}
-
 fn emit_event(event_type: &str, correlation_id: &str, payload: Value) {
-    let event = json!({
-        "event_id":       Uuid::new_v4().to_string(),
-        "event_type":     event_type,
-        "timestamp":      timestamp_ms(),
-        "correlation_id": correlation_id,
-        "source_module":  SOURCE_MODULE,
-        "payload":        payload,
+    project_schema::emit_event(Path::new(EVENTS_FILE), EventEnvelope {
+        source_module: SOURCE_MODULE,
+        event_type,
+        correlation_id,
+        payload,
     });
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(EVENTS_FILE)
-        .expect("Failed to open events file");
-    writeln!(file, "{}", event).expect("Failed to write event");
 }
 
 fn read_events() -> Result<Vec<Value>> {

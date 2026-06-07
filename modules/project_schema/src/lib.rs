@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+#[cfg(any(feature = "test-support", test))]
+pub mod test_support;
+
 const SOURCE_MODULE: &str = "project_schema";
 
 // ─── Schema types ─────────────────────────────────────────────────────────────
@@ -512,14 +515,23 @@ fn timestamp_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn emit_event(events_file: &Path, event_type: &str, correlation_id: &str, payload: JsonValue) {
+/// All fields required to emit one event to the runtime event log.
+pub struct EventEnvelope<'a> {
+    pub source_module:  &'a str,
+    pub event_type:     &'a str,
+    pub correlation_id: &'a str,
+    pub payload:        JsonValue,
+}
+
+/// Append one event to `events_file`. Creates the file if absent.
+pub fn emit_event(events_file: &Path, envelope: EventEnvelope<'_>) {
     let event = json!({
         "event_id":       Uuid::new_v4().to_string(),
-        "event_type":     event_type,
+        "event_type":     envelope.event_type,
         "timestamp":      timestamp_ms(),
-        "correlation_id": correlation_id,
-        "source_module":  SOURCE_MODULE,
-        "payload":        payload,
+        "correlation_id": envelope.correlation_id,
+        "source_module":  envelope.source_module,
+        "payload":        envelope.payload,
     });
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(events_file) {
         let _ = writeln!(file, "{}", event);
@@ -528,7 +540,12 @@ fn emit_event(events_file: &Path, event_type: &str, correlation_id: &str, payloa
 
 /// Emit the appropriate FAILURE event for a `SchemaError`.
 pub fn emit_schema_failure(events_file: &Path, error: &SchemaError, correlation_id: &str) {
-    emit_event(events_file, error.event_type(), correlation_id, error.to_payload());
+    emit_event(events_file, EventEnvelope {
+        source_module:  SOURCE_MODULE,
+        event_type:     error.event_type(),
+        correlation_id,
+        payload:        error.to_payload(),
+    });
 }
 
 /// Emit `SchemaTypeUnknown` (OBSERVATIONAL) when an item type is not in the schema.
@@ -538,15 +555,15 @@ pub fn emit_type_unknown(
     unknown_type: &str,
     correlation_id: &str,
 ) {
-    emit_event(
-        events_file,
-        "SchemaTypeUnknown",
+    emit_event(events_file, EventEnvelope {
+        source_module:  SOURCE_MODULE,
+        event_type:     "SchemaTypeUnknown",
         correlation_id,
-        json!({
+        payload:        json!({
             "item_id":      item_id,
             "unknown_type": unknown_type,
         }),
-    );
+    });
 }
 
 /// Convenience: load + validate, emitting failure events and printing to stderr on error.

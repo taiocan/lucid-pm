@@ -16,6 +16,7 @@ anyhow = "1"
 project_schema = { path = "../project_schema" }
 
 [dev-dependencies]
+project_schema = { path = "../project_schema", features = ["test-support"] }
 tempfile = "3"
 
 [[test]]

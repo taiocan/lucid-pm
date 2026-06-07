@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use project_schema::{emit_type_unknown, load_and_validate, resolve_type, ProjectSchema};
+use project_schema::{emit_type_unknown, load_and_validate, resolve_type, EventEnvelope, ProjectSchema};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, Write};
+use std::fs;
+use std::io::BufRead;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -56,20 +56,12 @@ fn format_date(ms: u64) -> String {
 }
 
 fn emit_event(event_type: &str, correlation_id: &str, payload: Value) {
-    let event = json!({
-        "event_id": Uuid::new_v4().to_string(),
-        "event_type": event_type,
-        "timestamp": timestamp_ms(),
-        "correlation_id": correlation_id,
-        "source_module": SOURCE_MODULE,
-        "payload": payload,
+    project_schema::emit_event(Path::new(EVENTS_FILE), EventEnvelope {
+        source_module: SOURCE_MODULE,
+        event_type,
+        correlation_id,
+        payload,
     });
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(EVENTS_FILE)
-        .expect("Failed to open events file");
-    writeln!(file, "{}", event).expect("Failed to write event");
 }
 
 fn read_events() -> Result<Vec<Value>> {

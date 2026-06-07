@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "demo",
+    "item_links",
+    "item_status",
+    "journal",
+    "logseq_export",
+    "logseq_sync",
+    "lucid",
+    "multi_project",
+    "ontology_suggest",
+    "pm_structuring",
+    "priority_view",
+    "project_schema",
+    "project_state",
+    "report_export",
+    "task_model",
+]
+resolver = "2"

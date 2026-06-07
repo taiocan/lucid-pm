@@ -32,10 +32,11 @@ echo ""
 
 mkdir -p "$INSTALL_DIR"
 
+echo "Building all modules..."
+cargo build --release --workspace --manifest-path "$SCRIPT_DIR/modules/Cargo.toml" --quiet
+
 for module in "${MODULES[@]}"; do
-  echo "Building $module..."
-  cargo build --release --manifest-path "$SCRIPT_DIR/modules/$module/Cargo.toml" --quiet
-  cp "$SCRIPT_DIR/modules/$module/target/release/$module" "$INSTALL_DIR/$module"
+  cp "$SCRIPT_DIR/modules/target/release/$module" "$INSTALL_DIR/$module"
   echo "  -> $INSTALL_DIR/$module"
 done
 

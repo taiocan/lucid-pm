@@ -4,20 +4,8 @@
 //! the approved event schema (events/item_status_schema.md): required fields,
 //! valid event types, correct payload shapes, and valid event sequences.
 
+use project_schema::test_support::load_fixture;
 use serde_json::Value;
-
-fn load_fixture(name: &str) -> Vec<Value> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/replay/fixtures")
-        .join(name);
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("Could not read fixture: {}", path.display()));
-    content
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect()
-}
 
 /// Filter to only item_status events.
 fn is_events(all: &[Value]) -> Vec<&Value> {

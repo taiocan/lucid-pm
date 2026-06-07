@@ -9,21 +9,9 @@
 //! Fixture: tests/replay/fixtures/task_model_runtime.jsonl
 //! Contains 11 events captured during Stage 6 runtime execution.
 
+use project_schema::test_support::load_fixture;
 use serde_json::Value;
 use std::collections::HashMap;
-
-fn load_runtime_fixture() -> Vec<Value> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/replay/fixtures")
-        .join("task_model_runtime.jsonl");
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("Could not read fixture: {}", path.display()));
-    content
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect()
-}
 
 fn tm_events(all: &[Value]) -> Vec<&Value> {
     all.iter()
@@ -52,7 +40,7 @@ const FAILURE: &[&str]       = &[
 
 #[test]
 fn test_runtime_all_events_have_required_base_fields() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
     assert!(!events.is_empty(), "Runtime fixture must contain task_model events");
 
@@ -76,7 +64,7 @@ fn test_runtime_all_events_have_required_base_fields() {
 
 #[test]
 fn test_runtime_all_event_types_in_approved_schema() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
 
     for event in &events {
@@ -90,7 +78,7 @@ fn test_runtime_all_event_types_in_approved_schema() {
 
 #[test]
 fn test_runtime_no_events_outside_approved_schema() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
     let unexpected: Vec<&str> = events.iter()
         .map(|e| e["event_type"].as_str().unwrap())
@@ -106,7 +94,7 @@ fn test_runtime_no_events_outside_approved_schema() {
 
 #[test]
 fn test_runtime_task_add_requested_payload_shape() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
     let requests: Vec<_> = events.iter()
         .filter(|e| e["event_type"] == "TaskAddRequested")
@@ -123,7 +111,7 @@ fn test_runtime_task_add_requested_payload_shape() {
 
 #[test]
 fn test_runtime_task_added_payload_shape() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
     let added: Vec<_> = events.iter()
         .filter(|e| e["event_type"] == "TaskAdded")
@@ -145,7 +133,7 @@ fn test_runtime_task_added_payload_shape() {
 
 #[test]
 fn test_runtime_task_marker_updated_payload_shape() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
     let updates: Vec<_> = events.iter()
         .filter(|e| e["event_type"] == "TaskMarkerUpdated")
@@ -166,7 +154,7 @@ fn test_runtime_task_marker_updated_payload_shape() {
 
 #[test]
 fn test_runtime_failure_events_have_failure_reason() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
 
     for event in events.iter().filter(|e| FAILURE.contains(&e["event_type"].as_str().unwrap())) {
@@ -179,7 +167,7 @@ fn test_runtime_failure_events_have_failure_reason() {
 
 #[test]
 fn test_runtime_parent_not_found_has_parent_item_id() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
     let failure = events.iter()
         .find(|e| e["event_type"] == "TaskAddFailedParentNotFound")
@@ -194,7 +182,7 @@ fn test_runtime_parent_not_found_has_parent_item_id() {
 
 #[test]
 fn test_runtime_every_chain_starts_with_observational_or_is_singleton_behavioral() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
 
     let mut chains: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -218,7 +206,7 @@ fn test_runtime_every_chain_starts_with_observational_or_is_singleton_behavioral
 
 #[test]
 fn test_runtime_every_chain_ends_with_behavioral_or_failure() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
 
     let mut chains: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -241,7 +229,7 @@ fn test_runtime_every_chain_ends_with_behavioral_or_failure() {
 fn test_runtime_no_orphaned_task_add_requested() {
     // Every TaskAddRequested must have a corresponding outcome event
     // (TaskAdded or a TaskAddFailed*) in the same correlation chain.
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
 
     let mut chains: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -261,7 +249,7 @@ fn test_runtime_no_orphaned_task_add_requested() {
 
 #[test]
 fn test_runtime_task_add_requested_precedes_outcome_in_every_chain() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
 
     let mut chains: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -287,7 +275,7 @@ fn test_runtime_task_add_requested_precedes_outcome_in_every_chain() {
 
 #[test]
 fn test_runtime_happy_path_chains_have_requested_then_added() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
 
     let mut chains: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -313,7 +301,7 @@ fn test_runtime_happy_path_chains_have_requested_then_added() {
 
 #[test]
 fn test_runtime_failure_chains_have_requested_then_failure() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
 
     let mut chains: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -338,7 +326,7 @@ fn test_runtime_failure_chains_have_requested_then_failure() {
 
 #[test]
 fn test_runtime_all_three_failure_paths_observed() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
     let types: Vec<&str> = events.iter()
         .map(|e| e["event_type"].as_str().unwrap())
@@ -354,7 +342,7 @@ fn test_runtime_all_three_failure_paths_observed() {
 
 #[test]
 fn test_runtime_task_marker_updated_observed() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
     assert!(
         events.iter().any(|e| e["event_type"] == "TaskMarkerUpdated"),
@@ -366,7 +354,7 @@ fn test_runtime_task_marker_updated_observed() {
 
 #[test]
 fn test_runtime_timestamps_are_monotonically_nondecreasing() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
     let timestamps: Vec<u64> = events.iter()
         .map(|e| e["timestamp"].as_u64().unwrap())
@@ -382,7 +370,7 @@ fn test_runtime_timestamps_are_monotonically_nondecreasing() {
 
 #[test]
 fn test_runtime_log_metrics_match_expected_stage6_output() {
-    let all = load_runtime_fixture();
+    let all = load_fixture("task_model_runtime.jsonl");
     let events = tm_events(&all);
 
     // 11 events = 2×(Requested+Added) + 3×(Requested+Failure) + 1×(MarkerUpdated)
