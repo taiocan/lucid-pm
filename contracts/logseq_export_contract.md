@@ -23,6 +23,65 @@ And any pages previously present in the output directory that do not correspond
 And the project event log is unchanged
 ```
 
+### Happy Path: Task Block with Owner and Dates
+
+```gherkin
+Given a task T exists in the project record with:
+  - current marker: DOING
+  - owner: stakeholder S whose Logseq page slug is "maria"
+  - scheduled_date: "2026-06-15"
+  - deadline: "2026-06-30"
+And T's parent item P has been exported as a page
+When the PM triggers an export
+Then T appears as an indented child block within P's page
+And T's block line is: `- DOING T-description [[maria]]`
+And T's block contains a :PROPERTIES: drawer with `:task-id: T-uuid`
+And T's block contains `SCHEDULED: <2026-06-15 Sun>`
+And T's block contains `DEADLINE: <2026-06-30 Tue>`
+```
+
+### Happy Path: Task Block with TBD Owner
+
+```gherkin
+Given a task T exists in the project record with owner_id "TBD"
+When the PM triggers an export
+Then T's block line is: `- MARKER T-description [[TBD]]`
+And no stakeholder page for TBD is created by the export
+```
+
+### Happy Path: Task Block with No Dates
+
+```gherkin
+Given a task T exists in the project record with no scheduled_date and no deadline
+When the PM triggers an export
+Then T's block line is: `- MARKER T-description [[owner-slug]]`
+And T's block contains no SCHEDULED line
+And T's block contains no DEADLINE line
+```
+
+### Happy Path: Work Package Relations as Page Properties
+
+```gherkin
+Given a work package item W exists with:
+  - an assigned_to link to stakeholder S (slug: "maria")
+  - a blocks link (outgoing) to work package X (slug: "infrastructure-setup")
+  - a blocks link (incoming) from work package Y (slug: "mobile-backend")
+When the PM triggers an export
+Then W's page header contains `assigned-to:: [[maria]]`
+And W's page header contains `blocking:: [[infrastructure-setup]]`
+And W's page header contains `blocked-by:: [[mobile-backend]]`
+And these relations do NOT appear as content section bullets under W's page
+```
+
+### Happy Path: Work Package with Multiple Targets on One Relation
+
+```gherkin
+Given a work package W has blocks (incoming) links from items Y and Z
+When the PM triggers an export
+Then W's page header contains `blocked-by:: [[Y-slug]] [[Z-slug]]`
+And all targets appear on the same property line, space-separated
+```
+
 ### Happy Path: Idempotent Re-export
 
 ```gherkin
@@ -82,6 +141,15 @@ And the project event log is unchanged
 - Relationship sections use Logseq outline indentation (indented child bullets) rather than
   markdown headers, enabling collapsing and block embedding in Logseq
 - Pages in the output directory not corresponding to any current item are deleted on each export
+- Every exported task block carries a `:PROPERTIES:` drawer containing `:task-id: <uuid>` —
+  this identity is never omitted, enabling logseq_sync to match blocks back to task records
+- Work package relations (assigned_to, outgoing blocks, incoming blocks) render as page
+  properties in the page header; non-work-package items render relations as content sections
+- The SCHEDULED and DEADLINE lines in task blocks use the format `<YYYY-MM-DD DDD>` where
+  DDD is the 3-letter English day abbreviation (e.g. `<2026-06-15 Mon>`); these lines are
+  omitted entirely when the task has no scheduled_date or deadline in the project record
+- The owner reference in a task block line is `[[owner-page-slug]]`; for TBD-owned tasks
+  the literal `[[TBD]]` is used; no TBD page is created
 
 ## Preconditions
 
@@ -106,7 +174,7 @@ And the project event log is unchanged
 
 ### Page format
 
-Each item page uses the following structure:
+**Non-work-package items** use the following structure:
 
 ```
 type:: <item_type>
@@ -120,9 +188,41 @@ tags:: <item_type>
     - [[<target-description-slug>]]
 ```
 
-`type::`, `status::`, `priority::`, `tags::` are Logseq page properties (double-colon syntax).
+**Work package items** use the following structure (relations as page properties):
+
+```
+type:: work package
+status:: <status or "not-set">
+priority:: <priority or "not-set">
+assigned-to:: [[<stakeholder-slug>]]
+blocking:: [[<slug1>]] [[<slug2>]]
+blocked-by:: [[<slug>]]
+tags:: work package
+
+- item-id: <uuid>
+```
+
+Work package relation properties are omitted when empty. The property names for blocks
+relations are always `blocking::` (outgoing) and `blocked-by::` (incoming).
+
+**Task blocks** are indented child blocks within their parent item's page:
+
+```
+    - <MARKER> <description> [[<owner-slug>]]
+      :PROPERTIES:
+      :task-id: <task-uuid>
+      :END:
+      SCHEDULED: <YYYY-MM-DD DDD>
+      DEADLINE: <YYYY-MM-DD DDD>
+```
+
+`type::`, `status::`, `priority::`, `tags::`, `assigned-to::`, `blocking::`, `blocked-by::` are
+Logseq page properties (double-colon syntax).
 `item-id:` is plain text (single-colon bullet) and does not create a Logseq index page.
-Relationship sections are omitted entirely when an item has no active links of that type.
+`:PROPERTIES:` ... `:END:` is an Org-mode drawer rendered by Logseq as collapsed metadata.
+Relationship sections on non-work-package items are omitted entirely when an item has no
+active links of that type.
+SCHEDULED/DEADLINE lines on task blocks are omitted when the task has no stored dates.
 
 ## Failure Classifications
 
@@ -139,7 +239,7 @@ status: APPROVED
 feature_id: logseq_export
 approved_by: human
 approved_at: 2026-05-25
-refined_at: 2026-05-29
+refined_at: 2026-06-08
 refinement_log: intents/logseq_export_refinements.md
 derived_from_intent: intents/logseq_export.md
 derived_event_schema: events/logseq_export_schema.md

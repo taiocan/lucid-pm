@@ -1,8 +1,9 @@
 type:: issue
+entity-id:: "UUID"
 status:: active
 priority:: high
 assigned-to:: [[Maria]]
-deadline:: [[Apr 15th, 2026]]
+deadline:: [[Jul 15th, 2026]]
 blocking:: [[Tower design]] 
 tags:: Issues
 

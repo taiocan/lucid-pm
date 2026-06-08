@@ -1,0 +1,62 @@
+{
+  "generatedAt": "2026-06-07T05:57:07.224Z",
+  "specVersion": "1.0.0",
+  "domains": [
+    {
+      "domain": "ontology",
+      "specPath": "openspec/specs/ontology/spec.md",
+      "sourceFiles": [
+        "/home/arc/projects/claude/LucidPM/events/ontology_suggest_schema_driven_proposals_schema.md",
+        "/home/arc/projects/claude/LucidPM/events/ontology_suggest_schema.md",
+        "/home/arc/projects/claude/LucidPM/intents/ontology_suggest_schema_driven_proposals.md",
+        "/home/arc/projects/claude/LucidPM/intents/ontology_suggest.md",
+        "/home/arc/projects/claude/LucidPM/contracts/ontology_suggest_schema_driven_proposals_contract.md",
+        "/home/arc/projects/claude/LucidPM/contracts/ontology_suggest_contract.md",
+        "/home/arc/projects/claude/LucidPM/backlog/R11-ontology_suggest-schema_driven_proposals.md",
+        "/home/arc/projects/claude/LucidPM/backlog/F9-ontology_suggest.md",
+        "/home/arc/projects/claude/LucidPM/tests/replay/ontology_suggest_replay.rs",
+        "/home/arc/projects/claude/LucidPM/tests/behavioral/ontology_suggest_behavior.rs",
+        "/home/arc/projects/claude/LucidPM/tests/replay/fixtures/ontology_suggest_happy_path.jsonl"
+      ],
+      "requirementCount": 1,
+      "dependsOn": [],
+      "calledBy": []
+    },
+    {
+      "domain": "project",
+      "specPath": "openspec/specs/project/spec.md",
+      "sourceFiles": [
+        "/home/arc/projects/claude/LucidPM/events/project_schema_schema.md",
+        "/home/arc/projects/claude/LucidPM/events/multi_project_schema.md",
+        "/home/arc/projects/claude/LucidPM/events/project_state_schema.md",
+        "/home/arc/projects/claude/LucidPM/events/project_state_schema_integration_schema.md",
+        "/home/arc/projects/claude/LucidPM/intents/project_state_schema_integration.md",
+        "/home/arc/projects/claude/LucidPM/intents/project_schema_refinements.md",
+        "/home/arc/projects/claude/LucidPM/intents/project_schema.md",
+        "/home/arc/projects/claude/LucidPM/intents/project_state.md",
+        "/home/arc/projects/claude/LucidPM/intents/multi_project.md",
+        "/home/arc/projects/claude/LucidPM/contracts/project_schema_contract.md",
+        "/home/arc/projects/claude/LucidPM/contracts/project_state_schema_integration_contract.md",
+        "/home/arc/projects/claude/LucidPM/contracts/multi_project_contract.md",
+        "/home/arc/projects/claude/LucidPM/contracts/project_state_contract.md",
+        "/home/arc/projects/claude/LucidPM/backlog/F11-project_schema.md",
+        "/home/arc/projects/claude/LucidPM/backlog/R10-project_state-schema_integration.md",
+        "/home/arc/projects/claude/LucidPM/backlog/F4-multi_project.md",
+        "/home/arc/projects/claude/LucidPM/project-schema.yaml",
+        "/home/arc/projects/claude/LucidPM/demo/project-schema.yaml",
+        "/home/arc/projects/claude/LucidPM/tests/replay/project_schema_replay.rs",
+        "/home/arc/projects/claude/LucidPM/tests/replay/multi_project_replay.rs",
+        "/home/arc/projects/claude/LucidPM/tests/replay/project_state_replay.rs",
+        "/home/arc/projects/claude/LucidPM/tests/behavioral/project_schema_behavior.rs",
+        "/home/arc/projects/claude/LucidPM/tests/behavioral/project_state_behavior.rs",
+        "/home/arc/projects/claude/LucidPM/tests/behavioral/multi_project_behavior.rs",
+        "/home/arc/projects/claude/LucidPM/tests/replay/fixtures/project_schema_events.jsonl",
+        "/home/arc/projects/claude/LucidPM/tests/replay/fixtures/project_state_happy_path.jsonl",
+        "/home/arc/projects/claude/LucidPM/tests/replay/fixtures/multi_project_happy_path.jsonl"
+      ],
+      "requirementCount": 2,
+      "dependsOn": [],
+      "calledBy": []
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 
 > AI-powered structured project knowledge extraction and operational management system with Logseq as a human-facing projection layer.
 
-Each feature has its own file in this folder. This index tracks ordering, dependencies, and status.
+Each feature has its own file in this folder. This index tracks ordering, dependencies, and status. New backlog entries should be drafted using `.codeos/templates/feature-brief.md` before entering Stage 1.
 
 ## Event Spine Note
 
@@ -39,7 +39,10 @@ Existing `pm_structuring` and `project_state` event schemas are untouched. Multi
 | R10 | `project_state` Stage 9 — schema integration (view) | Refine | project_state, F11 | None | COMPLETE |
 | R11 | `ontology_suggest` Stage 9 — schema-driven proposals | Refine | F9, F11, R4, R5 | None | COMPLETE |
 | F12 | `task_model` — task persistence and lifecycle sync | 7 — Task Layer | F11, F3, F7 | New schema (TaskAdded, TaskMarkerUpdated, TaskAddFailedParentNotFound, TaskAddFailedSchemaInvalid, TaskAddFailedTaskTypeNotDefined) | COMPLETE |
-| F13 | `lucid` — unified CLI entry point | 8 — Developer Experience | all features | None (dispatcher only) | BACKLOG |
+| F13 | `lucid` — unified CLI entry point | 8 — Developer Experience | all features | None (dispatcher only) | COMPLETE |
+| R12 | `lucid` Stage 9 — dispatcher/MODULES sync enforcement | Refine | F13 | None | BACKLOG |
+| F14 | `logseq-plugin` — Logseq plugin for LucidPM commands | 8 — Developer Experience | F13 | None (shell invocation only) | BACKLOG |
+| F15 | `demo` — self-contained demo project and walkthrough for onboarding | 8 — Developer Experience | F13, all features installed | None (static files only) | COMPLETE |
 
 Note: F2 depends on R1 so that Logseq export can include AI-proposed values from extraction.
 
@@ -92,6 +95,16 @@ F12 task_model                 ✅ COMPLETE
 F13 lucid unified CLI          ← single entry point for all features;
                                   bin/lucid exists as pre-DBA draft;
                                   full DBA process required
+R12 lucid Stage 9              ← dispatcher/MODULES sync enforcement;
+                                  one test/lint rule; depends on F13
+─────────────────────────────────────────────────────────────
+F14 logseq-plugin              ← invoke LucidPM commands from Logseq Desktop;
+                                  JS plugin using child_process → lucid;
+                                  depends on F13
+─────────────────────────────────────────────────────────────
+F15 demo                       ← self-contained demo project + WALKTHROUGH.md;
+                                  covers full workflow including edge cases;
+                                  static files only, no code changes
 ```
 
 F1 + R1 + F2 deliver: extraction with AI-suggested state → structured record → live Logseq pages.

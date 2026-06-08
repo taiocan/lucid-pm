@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const SOURCE_MODULE: &str = "logseq_export";
+const TBD_OWNER_ID: &str = "TBD";
 
 #[derive(Parser)]
 #[command(about = "Export the project record as Logseq pages")]
@@ -110,6 +111,9 @@ fn read_all_record_items() -> Result<Vec<RecordedItem>> {
                 description: p["description"].as_str().unwrap_or("").to_string(),
                 parent_item_id: p["parent_item_id"].as_str().map(String::from),
                 current_marker: p["initial_marker"].as_str().map(String::from),
+                owner_id: Some(p["owner_id"].as_str().unwrap_or(TBD_OWNER_ID).to_string()),
+                scheduled_date: p["scheduled_date"].as_str().map(String::from),
+                deadline: p["deadline"].as_str().map(String::from),
                 ..Default::default()
             })
         })
@@ -123,6 +127,40 @@ fn read_all_record_items() -> Result<Vec<RecordedItem>> {
             if let Some(task_id) = e["payload"]["task_id"].as_str() {
                 if let Some(task) = tasks.iter_mut().find(|t| t.item_id == task_id) {
                     task.current_marker = e["payload"]["new_marker"].as_str().map(String::from);
+                }
+            }
+        }
+    }
+
+    // Apply TaskOwnerUpdated events
+    for e in &events {
+        if e["source_module"].as_str() == Some("task_model")
+            && e["event_type"].as_str() == Some("TaskOwnerUpdated")
+        {
+            if let Some(task_id) = e["payload"]["task_id"].as_str() {
+                if let Some(task) = tasks.iter_mut().find(|t| t.item_id == task_id) {
+                    if let Some(new_owner) = e["payload"]["new_owner_id"].as_str() {
+                        task.owner_id = Some(new_owner.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Apply TaskDatesUpdated events
+    for e in &events {
+        if e["source_module"].as_str() == Some("task_model")
+            && e["event_type"].as_str() == Some("TaskDatesUpdated")
+        {
+            if let Some(task_id) = e["payload"]["task_id"].as_str() {
+                if let Some(task) = tasks.iter_mut().find(|t| t.item_id == task_id) {
+                    let p = &e["payload"];
+                    if p.get("new_scheduled_date").is_some() {
+                        task.scheduled_date = p["new_scheduled_date"].as_str().map(String::from);
+                    }
+                    if p.get("new_deadline").is_some() {
+                        task.deadline = p["new_deadline"].as_str().map(String::from);
+                    }
                 }
             }
         }
@@ -165,6 +203,30 @@ fn current_priority(item_id: &str) -> Result<Option<String>> {
 /// Return the recorded deadline for an item, or None if not set.
 fn current_deadline(_item_id: &str) -> Result<Option<String>> {
     Ok(None)
+}
+
+/// Tomohiko Sakamoto's algorithm for day-of-week (0=Sun .. 6=Sat).
+fn day_of_week_abbr(year: i32, month: u32, day: u32) -> &'static str {
+    const T: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let y = if month < 3 { year - 1 } else { year };
+    let dow = (y + y/4 - y/100 + y/400 + T[month as usize - 1] + day as i32).rem_euclid(7);
+    match dow { 0 => "Sun", 1 => "Mon", 2 => "Tue", 3 => "Wed", 4 => "Thu", 5 => "Fri", _ => "Sat" }
+}
+
+/// Convert ISO date "YYYY-MM-DD" to Logseq format "<YYYY-MM-DD DDD>".
+fn format_logseq_date(iso: &str) -> String {
+    let p: Vec<&str> = iso.split('-').collect();
+    if p.len() != 3 { return format!("<{}>", iso); }
+    let (y, m, d): (i32, u32, u32) = match (p[0].parse(), p[1].parse(), p[2].parse()) {
+        (Ok(y), Ok(m), Ok(d)) if m >= 1 && m <= 12 && d >= 1 => (y, m, d),
+        _ => return format!("<{}>", iso),
+    };
+    format!("<{} {}>", iso, day_of_week_abbr(y, m, d))
+}
+
+/// Convert a relation label string to a Logseq page property key (lowercase kebab).
+fn label_to_property_key(label: &str) -> String {
+    label.to_lowercase().replace(' ', "-")
 }
 
 fn proposed_status_and_priority(item_id: &str) -> Result<(Option<String>, Option<String>)> {
@@ -358,6 +420,44 @@ fn render_page(
     )
 }
 
+/// Render a work package page with relations as page properties rather than content sections.
+fn render_work_package_page(
+    item: &RecordedItem,
+    canonical_type: &str,
+    status: Option<&str>,
+    priority: Option<&str>,
+    links: &[LinkRecord],
+    slug_map: &HashMap<String, String>,
+    schema: &ProjectSchema,
+) -> String {
+    let type_tag = type_to_logseq_tag(canonical_type);
+    let status_val = status.unwrap_or("not-set");
+    let priority_val = priority.unwrap_or("not-set");
+
+    let mut props: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for link in links {
+        if link.source_id == item.item_id {
+            let key = label_to_property_key(logseq_forward_label(schema, &link.link_type));
+            let tgt = slug_map.get(&link.target_id).cloned().unwrap_or_else(|| link.target_id.clone());
+            props.entry(key).or_default().push(format!("[[{}]]", tgt));
+        } else if link.target_id == item.item_id {
+            let key = label_to_property_key(logseq_inverse_label(schema, &link.link_type));
+            let src = slug_map.get(&link.source_id).cloned().unwrap_or_else(|| link.source_id.clone());
+            props.entry(key).or_default().push(format!("[[{}]]", src));
+        }
+    }
+
+    let mut relation_props = String::new();
+    for (key, refs) in &props {
+        relation_props.push_str(&format!("{}:: {}\n", key, refs.join(" ")));
+    }
+
+    format!(
+        "type:: {}\nstatus:: {}\npriority:: {}\n{}tags:: {}\n\n- item-id: {}\n",
+        type_tag, status_val, priority_val, relation_props, type_tag, item.item_id,
+    )
+}
+
 fn check_output_dir_writable(pages_dir: &Path) -> bool {
     let test_path = pages_dir.join(".write_check");
     match fs::write(&test_path, b"") {
@@ -493,26 +593,47 @@ fn cmd_export(output_dir: &str) -> Result<()> {
         let status = effective_status(&item.item_id)?;
         let priority = effective_priority(&item.item_id)?;
         let deadline = current_deadline(&item.item_id)?;
-        let mut content = render_page(
-            item,
-            canonical_type,
-            status.as_deref(),
-            priority.as_deref(),
-            deadline.as_deref(),
-            &links,
-            &slug_map,
-            &schema,
-        );
+        let mut content = if *canonical_type == "work_package" {
+            render_work_package_page(
+                item,
+                canonical_type,
+                status.as_deref(),
+                priority.as_deref(),
+                &links,
+                &slug_map,
+                &schema,
+            )
+        } else {
+            render_page(
+                item,
+                canonical_type,
+                status.as_deref(),
+                priority.as_deref(),
+                deadline.as_deref(),
+                &links,
+                &slug_map,
+                &schema,
+            )
+        };
 
-        // Append task block lines for tasks whose parent is this item
+        // Append task blocks for tasks whose parent is this item (new format)
         if let Some(child_tasks) = tasks_by_parent.get(&item.item_id) {
-            content.push_str("\n- Tasks\n");
             for task in child_tasks {
                 let marker = task.current_marker.as_deref().unwrap_or("TODO");
-                content.push_str(&format!(
-                    "    - {} task-id: {} {}\n",
-                    marker, task.item_id, task.description
-                ));
+                let owner_id = task.owner_id.as_deref().unwrap_or(TBD_OWNER_ID);
+                let owner_ref = if owner_id == TBD_OWNER_ID {
+                    "TBD".to_string()
+                } else {
+                    slug_map.get(owner_id).cloned().unwrap_or_else(|| "TBD".to_string())
+                };
+                content.push_str(&format!("\n- {} {} [[{}]]\n", marker, task.description, owner_ref));
+                content.push_str(&format!("  :PROPERTIES:\n  :task-id: {}\n  :END:\n", task.item_id));
+                if let Some(ref sched) = task.scheduled_date {
+                    content.push_str(&format!("  SCHEDULED: {}\n", format_logseq_date(sched)));
+                }
+                if let Some(ref dl) = task.deadline {
+                    content.push_str(&format!("  DEADLINE: {}\n", format_logseq_date(dl)));
+                }
             }
         }
 

@@ -1,0 +1,92 @@
+# LucidPM Project Schema — Nucleus Platform v2
+# Demo project vocabulary. Extends the default schema with project-specific configuration.
+schemaVersion: 1
+
+properties:
+  status:
+    type: enum
+  priority:
+    type: enum
+    values:
+      - low
+      - medium
+      - high
+  deadline:
+    type: date
+  scheduled:
+    type: date
+
+statuses:
+  todo:
+  doing:
+  done:
+  waiting:
+  cancelled:
+  pending:
+  achieved:
+  missed:
+  open:
+  mitigated:
+  accepted:
+  closed:
+  in_progress:
+  resolved:
+  active:
+  inactive:
+
+pageTypes:
+  Milestone:
+    uses: [status, deadline]
+    allowedStatuses: [pending, achieved, missed]
+    aliases: [milestone]
+  Risk:
+    uses: [status, priority, deadline]
+    allowedStatuses: [open, mitigated, accepted, closed]
+    aliases: [risk]
+  Issue:
+    uses: [status, priority, deadline]
+    allowedStatuses: [open, in_progress, resolved, closed]
+    aliases: [issue]
+  Task:
+    uses: [status]
+    allowedStatuses: [todo, doing, done, waiting, cancelled]
+    aliases: [task]
+  Stakeholder:
+    uses: [status]
+    allowedStatuses: [active, inactive]
+    aliases: [stakeholder]
+
+relations:
+  blocks:
+    source: [Risk, Issue, Task]
+    target: [Milestone, Task]
+  affects:
+    source: [Risk, Issue]
+    target: [Milestone, Task, Stakeholder]
+  assignedTo:
+    source: [Task, Issue]
+    target: [Stakeholder]
+  relatedTo:
+    source: [any]
+    target: [any]
+
+renderers:
+  logseq:
+    relations:
+      blocks:
+        forwardLabel: "Blocks"
+        inverseLabel: "Blocked By"
+      affects:
+        forwardLabel: "Affects"
+        inverseLabel: "Affected By"
+      assignedTo:
+        forwardLabel: "Assigned To"
+        inverseLabel: "Owns"
+      relatedTo:
+        forwardLabel: "Related To"
+        inverseLabel: "Related To"
+    properties:
+      deadline: deadline
+      scheduled: scheduled
+      status: status
+      priority: priority

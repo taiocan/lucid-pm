@@ -3,9 +3,9 @@ status:: active
 priority:: high
 assigned-to:: [[Maria]]
 deadline:: [[Jun 11th, 2026]]
-blocked-by-issues:: [[Manko kadra]] [[Manko opreme]]
+blocked-by:: [[Manko kadra]] [[Manko opreme]]
 blocking:: [[M2]] 
-tags:: WP
+tags:: Work Packages
 
 - item-id: c50cc01b-83b9-4cd8-99cc-5222b01dec6a
 - LATER zahteve [[Maria]]

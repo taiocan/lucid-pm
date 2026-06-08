@@ -1,0 +1,6 @@
+{:meta/version 1
+ :graph/name "Nucleus Platform v2 (LucidPM Demo)"
+ :preferred-format :markdown
+ :journal/page-title-format "yyyy-MM-dd"
+ :ui/enable-tooltip? true
+ :feature/enable-block-timestamps? false}

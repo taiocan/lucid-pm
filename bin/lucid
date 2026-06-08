@@ -20,6 +20,7 @@ case "$CMD" in
   suggest)   exec "$LUCID_BIN_DIR/ontology_suggest" "$@" ;;
   journal)   exec "$LUCID_BIN_DIR/journal" "$@" ;;
   schema)    exec "$LUCID_BIN_DIR/project_schema" "$@" ;;
+  task)      exec "$LUCID_BIN_DIR/task_model" "$@" ;;
   version)
     echo "LucidPM lucid CLI"
     ;;
@@ -87,6 +88,10 @@ Commands:
                lucid schema validate                      (check project-schema.yaml)
                lucid schema show                          (print resolved vocabulary)
                lucid schema validate --project-dir <path> (explicit project dir)
+
+  task       Manage task instances in the project record
+               lucid task add --description "write tests" --parent item-001
+               lucid task add --description "review PR" --parent item-002 --marker DOING
 
   version    Print version info
   help       Show this message

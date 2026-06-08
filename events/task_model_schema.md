@@ -29,52 +29,52 @@ execution chain.
 ## Design Notes
 
 **task_id is the unified identity:**
-In this schema, `task_id` serves as both the project record item
-identifier and the stable sync identity. The contract abstracted the
-stable task identifier as an implementation choice; this schema
-makes the coupling explicit: the `task_id` assigned at creation is
-the same value embedded in the task block line at export time and
-read back during sync. Implementations that need project item UUID
-and sync correlation token to be distinct would require a schema
-amendment.
+`task_id` serves as both the project record item identifier and the
+stable sync identity. The `task_id` assigned at creation is the same
+value embedded in the task block line at export time and read back
+during sync. Implementations that need the project item UUID and sync
+correlation token to be distinct would require a schema amendment.
 
 **TaskAdded is authoritative; TaskAddRequested is optional:**
-Every task instance creation — whether via direct user action or via
-sync discovery — is recorded by a `TaskAdded` event. `TaskAddRequested`
-is emitted only for direct user-initiated creation; it is absent from
-the sync discovery path. `TaskAdded` is the authoritative record of
-task existence; `TaskAddRequested` is an observational precursor for
-user-initiated operations only.
+Every task instance creation — via direct user action or via sync
+discovery — is recorded by a `TaskAdded` event. `TaskAddRequested` is
+emitted only for direct user-initiated creation; it is absent from the
+sync discovery path.
+
+**owner_id in TaskAdded:**
+`owner_id` carries the item ID of the assigned owner stakeholder. When
+no owner was specified at creation, `owner_id` is the item ID of the
+TBD placeholder stakeholder. The TBD placeholder is a stakeholder
+entity whose existence is an invariant of any project running
+task_model; its item ID is an implementation detail resolved at
+runtime. `owner_id` is never null.
+
+**Additive payload fields in TaskAdded:**
+`owner_id`, `scheduled_date`, and `deadline` are new fields in
+`TaskAdded`. They do not alter the semantics of existing fields.
+`TaskAdded` events emitted before this refinement are treated as
+having `owner_id = TBD placeholder ID`, `scheduled_date = null`,
+`deadline = null` for backward compatibility.
+
+**Sync discovery — owner defaults to TBD:**
+Task instances discovered via sync (unknown `task_id`) are registered
+with `owner_id = TBD placeholder ID`. Their dates are populated from
+any SCHEDULED and DEADLINE lines found in the block if present.
+
+**Multiple sync events per task block line:**
+A single task block line can produce zero, one, or more of
+`TaskMarkerUpdated`, `TaskOwnerUpdated`, and `TaskDatesUpdated` in the
+same sync run if multiple attributes have changed simultaneously. These
+events are independent; no ordering between them is prescribed.
 
 **Sync discovery requires a stable identifier:**
 Only task block lines that carry a stable identifier (`task_id`) are
-eligible for discovery during sync. Task block lines with no
-resolvable stable identifier are silently skipped — they produce
-no `TaskAdded` and are not registered as task instances. This is the
-architectural consequence of the contract's discovery definition:
-Logseq-authored tasks must already carry a stable identifier to be
-eligible for discovery. The system does not generate or assign
-identifiers to identifier-less block lines during sync.
-
-**Marker update during sync:**
-When logseq_sync encounters a task block line whose `task_id` resolves
-to a known task and whose marker differs from the stored current
-marker, it emits `TaskMarkerUpdated`. Downstream effective-status
-resolution reads the latest `TaskMarkerUpdated.new_marker` for the
-task, falling back to `TaskAdded.initial_marker` if no update exists.
-Reconstructing which parent item contained the task requires reading
-the historical `TaskAdded` event; the parent association is not
-repeated in `TaskMarkerUpdated` because it is immutable.
-
-**TaskMarkerSyncSkipped:**
-When a task block line's marker is not vocabulary-recognized during
-sync, the task's state is left unchanged. No task_model event is
-emitted for this case — the observable signal is purely behavioral
-(unchanged state, sync continues). The logseq_sync module handles any
-sync-level skip signalling through its own event spine.
+eligible for sync discovery. Task block lines with no resolvable stable
+identifier are silently skipped — they produce no events and are not
+registered as task instances.
 
 **Validation order (task add):**
-The contract does not prescribe an ordering between the three failure
+The contract does not prescribe ordering between the four failure
 conditions. The flow diagram represents them as a mutually exclusive
 set; no sequence is implied.
 
@@ -89,8 +89,14 @@ set; no sequence is implied.
 - payload:
   - `description`: `string` — the task description provided by the PM
   - `parent_item_id`: `string` — the parent item ID provided by the PM
-  - `requested_marker`: `string | null` — the initial marker requested
-    by the PM; null if no marker was specified (default will be used)
+  - `requested_marker`: `string | null` — the initial marker requested;
+    null if not specified
+  - `requested_owner_id`: `string | null` — the owner item ID provided
+    by the PM; null if not specified (TBD placeholder will be used)
+  - `requested_scheduled_date`: `string | null` — ISO date (YYYY-MM-DD)
+    or null if not specified
+  - `requested_deadline`: `string | null` — ISO date (YYYY-MM-DD) or
+    null if not specified
 
 ### TaskAdded
 
@@ -107,6 +113,12 @@ set; no sequence is implied.
   - `parent_item_id`: `string` — the identifier of the parent project
     record item
   - `initial_marker`: `string` — the task marker assigned at creation
+  - `owner_id`: `string` — the item ID of the owner stakeholder;
+    equals the TBD placeholder item ID when no named owner was specified
+  - `scheduled_date`: `string | null` — ISO date (YYYY-MM-DD) of the
+    scheduled start; null if not set
+  - `deadline`: `string | null` — ISO date (YYYY-MM-DD) of the
+    deadline; null if not set
 
 ### TaskMarkerUpdated
 
@@ -115,15 +127,44 @@ set; no sequence is implied.
   task's current stored marker during sync, and the new marker is
   present in the vocabulary's block type marker mapping
 - payload:
-  - `task_id`: `string` — the unified identity of the task whose
-    marker changed
+  - `task_id`: `string` — the identity of the task whose marker changed
   - `previous_marker`: `string` — the marker before the change
   - `new_marker`: `string` — the marker as read from the Logseq page
 
 Note: the parent item association is not repeated here because it is
 immutable and already recorded in the originating `TaskAdded` event.
-Reconstructing the full task context requires reading `TaskAdded` for
-this `task_id`.
+
+### TaskOwnerUpdated
+
+- category: BEHAVIORAL
+- emitted when: a task block line's owner reference changes during sync
+  and the referenced name resolves to a known stakeholder in the
+  project record
+- payload:
+  - `task_id`: `string` — the identity of the task whose owner changed
+  - `previous_owner_id`: `string` — the item ID of the owner before
+    the change
+  - `new_owner_id`: `string` — the item ID of the newly resolved owner
+
+Note: when the owner reference in Logseq does not resolve to any known
+stakeholder, no event is emitted and the owner is unchanged (contract:
+Boundary Scenario 7).
+
+### TaskDatesUpdated
+
+- category: BEHAVIORAL
+- emitted when: a task block line's SCHEDULED or DEADLINE date changes
+  during sync (one or both may change in a single sync run)
+- payload:
+  - `task_id`: `string` — the identity of the task whose dates changed
+  - `previous_scheduled_date`: `string | null` — ISO date before the
+    change; null if no scheduled date was previously stored
+  - `new_scheduled_date`: `string | null` — ISO date after the change;
+    null if the date was cleared
+  - `previous_deadline`: `string | null` — ISO date before the change;
+    null if no deadline was previously stored
+  - `new_deadline`: `string | null` — ISO date after the change; null
+    if the date was cleared
 
 ### TaskAddFailedParentNotFound
 
@@ -133,6 +174,15 @@ this `task_id`.
 - payload:
   - `failure_reason`: `string` — `"parent_not_found"`
   - `parent_item_id`: `string` — the ID that was not found
+
+### TaskAddFailedOwnerNotFound
+
+- category: FAILURE
+- emitted when: the owner item ID supplied to task add does not resolve
+  to any stakeholder item in the project record
+- payload:
+  - `failure_reason`: `string` — `"owner_not_found"`
+  - `owner_id`: `string` — the ID that was not found
 
 ### TaskAddFailedSchemaInvalid
 
@@ -163,41 +213,47 @@ this event. This event records the task add business outcome only.
 ```text
 ── task add ─────────────────────────────────────────────────────────────────
 
-TaskAddRequested                      ← task creation requested by user action
+TaskAddRequested                       ← task creation requested by user action
 
 Then exactly one of:
 
-  TaskAddFailedSchemaInvalid          ← FAILURE (SchemaInvalid)
+  TaskAddFailedSchemaInvalid           ← FAILURE (SchemaInvalid)
     accompanied by cross-module events from project_schema:
     SchemaParseError | SchemaValidationFailed | SchemaAliasCollisionDetected
 
-  TaskAddFailedTaskTypeNotDefined     ← FAILURE (TaskTypeNotDefined)
+  TaskAddFailedTaskTypeNotDefined      ← FAILURE (TaskTypeNotDefined)
 
-  TaskAddFailedParentNotFound         ← FAILURE (ParentNotFound)
+  TaskAddFailedParentNotFound          ← FAILURE (ParentNotFound)
 
-  TaskAdded                           ← BEHAVIORAL; task instance created
+  TaskAddFailedOwnerNotFound           ← FAILURE (OwnerNotFound)
 
-The three failure conditions are mutually exclusive; no evaluation
+  TaskAdded                            ← BEHAVIORAL; task instance created
+                                         with owner_id, scheduled_date, deadline
+
+The four failure conditions are mutually exclusive; no evaluation
 order between them is prescribed.
 
 ── logseq_sync (task-related portion) ───────────────────────────────────────
 
 [within a sync run, per task block line encountered]
 
-For each task block line, exactly one of:
+Case 1 — known task_id (task exists in project record):
+  Zero or more of the following, independently, one per changed
+  attribute:
 
-  TaskMarkerUpdated                   ← BEHAVIORAL (known task_id; marker changed;
-                                        new marker vocabulary-recognized)
+    TaskMarkerUpdated     ← marker changed; new marker vocabulary-recognized
+    TaskOwnerUpdated      ← owner reference changed; resolves to known stakeholder
+    TaskDatesUpdated      ← scheduled date or deadline changed
 
-  TaskAdded                           ← BEHAVIORAL (unknown task_id;
-                                        marker vocabulary-recognized;
-                                        task discovered)
+  If marker changed but not vocabulary-recognized: no event; state unchanged
+  If owner reference changed but name not resolvable: no event; owner unchanged
 
-  [no task_model event]               ← (TaskMarkerSyncSkipped: marker not
-                                        vocabulary-recognized; task state unchanged)
+Case 2 — unknown task_id; marker vocabulary-recognized:
+  TaskAdded               ← BEHAVIORAL; discovered task; owner_id = TBD placeholder;
+                            dates populated if SCHEDULED/DEADLINE lines present
 
-  [no task_model event]               ← (no resolvable stable identifier;
-                                        silently skipped)
+Case 3 — no resolvable stable identifier:
+  [no task_model event]   ← silently skipped
 ```
 
 ---
@@ -211,9 +267,7 @@ For each task block line, exactly one of:
 | SchemaAliasCollisionDetected | project_schema | SchemaInvalid failure: schema file present but contains alias collision — accompanies TaskAddFailedSchemaInvalid |
 
 Note: SchemaNotFound is not listed because the embedded default
-vocabulary guarantees a vocabulary is always present. SchemaNotFound
-cannot occur during task operations (contract: Embedded default
-vocabulary definition; Boundary Scenarios 1 and 2).
+vocabulary guarantees a vocabulary is always present.
 
 ---
 
@@ -224,26 +278,36 @@ vocabulary definition; Boundary Scenarios 1 and 2).
 | Contract Scenario | Event(s) | Status |
 |---|---|---|
 | HP1: Task created via direct command | `TaskAddRequested`, `TaskAdded` | COVERED |
-| HP2: Task visible in priority-filtered view | (no new events — task visibility is via project record reads) | COVERED — by design |
-| HP3: Task effective status from current marker | (no new events — marker-derived resolution reads `TaskAdded.initial_marker` and `TaskMarkerUpdated.new_marker`) | COVERED — by design |
-| HP4: Task exported as nested block line | (no new events — logseq_export amendment; existing export events unchanged) | COVERED — by design |
+| HP2: Task visible in priority-filtered view | (no new events — task visibility via project record reads) | COVERED — by design |
+| HP3: Task effective status from current marker | (no new events — reads `TaskAdded.initial_marker` + `TaskMarkerUpdated.new_marker`) | COVERED — by design |
+| HP4: Task exported as nested block line with owner + dates | (no new events — logseq_export amendment; `TaskAdded` payload carries owner + dates) | COVERED — by design |
 | HP5: Task marker change synced from Logseq | `TaskMarkerUpdated` | COVERED |
-| HP6: Task discovered in Logseq during sync | `TaskAdded` (same event as direct creation) | COVERED |
-| HP7: Typed link between task and another item | (no new events — item_links handles link creation) | COVERED — by design |
-| BS1: No schema — behavior unchanged when no tasks | (no new events — embedded default vocabulary handles silently) | COVERED — by design |
-| BS2: No schema — default vocabulary used when tasks present | (no new events — default vocabulary is active) | COVERED — by design |
-| BS3: Repeated sync — no duplicate task instances | (deduplication: same stable identifier → `TaskAdded` emitted only on first discovery) | COVERED — by design |
-| BS4: Parent has no tasks — export page unaffected | (no new events — logseq_export behavior unchanged for task-less parents) | COVERED — by design |
+| HP6: Task discovered in Logseq during sync | `TaskAdded` (owner_id = TBD) | COVERED |
+| HP7: Typed link between task and another item | (no new events — item_links handles) | COVERED — by design |
+| HP8: Task created with named owner | `TaskAddRequested`, `TaskAdded` (owner_id = S) | COVERED |
+| HP9: Task created without owner — TBD assigned | `TaskAddRequested`, `TaskAdded` (owner_id = TBD) | COVERED |
+| HP10: Task created with scheduled date and deadline | `TaskAddRequested`, `TaskAdded` (scheduled_date, deadline set) | COVERED |
+| HP11: Ownership change synced from Logseq | `TaskOwnerUpdated` | COVERED |
+| HP12: Date changes synced from Logseq | `TaskDatesUpdated` | COVERED |
+| BS1: No schema — behavior unchanged when no tasks | (no new events) | COVERED — by design |
+| BS2: No schema — default vocabulary used when tasks present | (no new events) | COVERED — by design |
+| BS3: Repeated sync — no duplicate task instances | (deduplication: same task_id → no new `TaskAdded`) | COVERED — by design |
+| BS4: Parent has no tasks — export page unaffected | (no new events) | COVERED — by design |
+| BS5: Task without dates is valid in all operations | (no new events — null dates in `TaskAdded` is valid) | COVERED — by design |
+| BS6: TBD-owned task participates in all queries | (no new events — TBD owner_id in `TaskAdded` is valid) | COVERED — by design |
+| BS7: Sync with unresolvable owner — owner unchanged | (no event — contract: silent skip) | COVERED — by design |
 | FP1: ParentNotFound | `TaskAddRequested`, `TaskAddFailedParentNotFound` | COVERED |
 | FP2: SchemaInvalid | cross-module events, `TaskAddRequested`, `TaskAddFailedSchemaInvalid` | COVERED |
 | FP3: TaskTypeNotDefined | `TaskAddRequested`, `TaskAddFailedTaskTypeNotDefined` | COVERED |
 | FP4: TaskMarkerSyncSkipped | (no task_model event — behavioral outcome only) | COVERED — by design |
+| FP5: OwnerNotFound | `TaskAddRequested`, `TaskAddFailedOwnerNotFound` | COVERED |
 
 ### Contract failures → FAILURE events
 
 | Contract Failure | FAILURE Event | Status |
 |---|---|---|
 | ParentNotFound | `TaskAddFailedParentNotFound` | COVERED |
+| OwnerNotFound | `TaskAddFailedOwnerNotFound` | COVERED |
 | SchemaInvalid | `TaskAddFailedSchemaInvalid` | COVERED |
 | TaskTypeNotDefined | `TaskAddFailedTaskTypeNotDefined` | COVERED |
 | TaskMarkerSyncSkipped | (no FAILURE event — observable signal is unchanged state) | COVERED — by design |
@@ -253,6 +317,6 @@ vocabulary definition; Boundary Scenarios 1 and 2).
 status: APPROVED
 feature_id: task_model
 approved_by: human
-approved_at: 2026-06-04
+approved_at: 2026-06-08
 derived_from_intent: intents/task_model.md
 derived_from_contract: contracts/task_model_contract.md

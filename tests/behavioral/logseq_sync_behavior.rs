@@ -1000,3 +1000,263 @@ pageTypes:
     assert!(!types.contains(&"ItemStatusUpdated"),
         "No status update for type with empty allowedStatuses");
 }
+
+// ── R_export_format: new task block format (logseq_sync) ─────────────────────
+
+const BLOCK_SCHEMA: &str = r#"schemaVersion: 1
+statuses:
+  todo:
+  doing:
+  done:
+  active:
+pageTypes:
+  WorkPackage:
+    allowedStatuses: [todo, doing, done]
+    aliases: [work_package]
+  Stakeholder:
+    allowedStatuses: [active]
+    aliases: [stakeholder]
+blockTypes:
+  task_block:
+    markers:
+      TODO: todo
+      DOING: doing
+      DONE: done
+"#;
+
+const TASK_ID_S1: &str = "bbbbbbbb-1111-2222-3333-444444444444";
+const ITEM_WP_S:  &str = "cccccccc-1111-2222-3333-444444444444";
+const ITEM_SH_S:  &str = "dddddddd-1111-2222-3333-444444444444";
+
+fn setup_dir_with_block_schema() -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("events")).unwrap();
+    write_project_schema(&dir, BLOCK_SCHEMA);
+    dir
+}
+
+fn run_binary_isolated(dir: &TempDir, graph_dir: &str) -> std::process::Output {
+    Command::new(binary_path())
+        .current_dir(dir.path())
+        .args(["--graph", graph_dir])
+        .env("HOME", dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("Failed to run binary")
+}
+
+fn seed_task_added_s(
+    dir: &TempDir,
+    task_id: &str,
+    parent_id: &str,
+    marker: &str,
+    owner_id: &str,
+    scheduled_date: Option<&str>,
+    deadline: Option<&str>,
+) {
+    let event = json!({
+        "event_id":       format!("seed-task-{}", &task_id[..8]),
+        "event_type":     "TaskAdded",
+        "timestamp":      1748000010000u64,
+        "correlation_id": "00000000-0000-0000-0000-000000000099",
+        "source_module":  "task_model",
+        "payload": {
+            "task_id":        task_id,
+            "item_type":      "task_block",
+            "description":    "Review auth checklist",
+            "parent_item_id": parent_id,
+            "initial_marker": marker,
+            "owner_id":       owner_id,
+            "scheduled_date": scheduled_date,
+            "deadline":       deadline,
+        }
+    });
+    let path = dir.path().join("events/runtime_events.jsonl");
+    let mut file = fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
+    writeln!(file, "{}", event).unwrap();
+}
+
+fn write_page_with_task_new_format(
+    graph_dir: &str,
+    parent_id: &str,
+    parent_slug: &str,
+    task_id: &str,
+    marker: &str,
+    description: &str,
+    owner_ref: &str,
+    scheduled: Option<&str>,
+    deadline: Option<&str>,
+) {
+    let pages_dir = std::path::Path::new(graph_dir).join("pages");
+    fs::create_dir_all(&pages_dir).unwrap();
+    let mut content = format!(
+        "type:: work_package\nstatus:: not-set\npriority:: not-set\ntags:: work_package\n\n- item-id: {}\n",
+        parent_id
+    );
+    content.push_str(&format!("\n- {} {} [[{}]]\n", marker, description, owner_ref));
+    content.push_str(&format!("  :PROPERTIES:\n  :task-id: {}\n  :END:\n", task_id));
+    if let Some(s) = scheduled {
+        content.push_str(&format!("  SCHEDULED: {}\n", s));
+    }
+    if let Some(d) = deadline {
+        content.push_str(&format!("  DEADLINE: {}\n", d));
+    }
+    fs::write(pages_dir.join(format!("{}.md", parent_slug)), content).unwrap();
+}
+
+fn read_task_sync_events(dir: &TempDir) -> Vec<Value> {
+    let path = dir.path().join("events/runtime_events.jsonl");
+    if !path.exists() { return vec![]; }
+    fs::read_to_string(path).unwrap()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .filter(|e| {
+            let et = e["event_type"].as_str().unwrap_or("");
+            et == "TaskMarkerUpdated" || et == "TaskOwnerUpdated" || et == "TaskDatesUpdated"
+        })
+        .collect()
+}
+
+#[test]
+fn test_sync_new_format_task_marker_change_emits_task_marker_updated() {
+    let dir = setup_dir_with_block_schema();
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_WP_S, "work_package", "Sprint Alpha")]);
+    seed_task_added_s(&dir, TASK_ID_S1, ITEM_WP_S, "TODO", "TBD", None, None);
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+    write_page_with_task_new_format(
+        &graph_dir, ITEM_WP_S, "sprint-alpha", TASK_ID_S1,
+        "DOING", "Review auth checklist", "TBD",
+        None, None,
+    );
+
+    run_binary_isolated(&dir, &graph_dir);
+
+    let events = read_task_sync_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(
+        types.contains(&"TaskMarkerUpdated"),
+        "New-format task block: DOING in page vs TODO in record must emit TaskMarkerUpdated"
+    );
+    let upd = events.iter().find(|e| e["event_type"] == "TaskMarkerUpdated").unwrap();
+    assert_eq!(upd["payload"]["task_id"].as_str().unwrap(), TASK_ID_S1);
+    assert_eq!(upd["payload"]["new_marker"].as_str().unwrap(), "DOING");
+}
+
+#[test]
+fn test_sync_new_format_task_owner_change_emits_task_owner_updated() {
+    let dir = setup_dir_with_block_schema();
+    seed_incorporated_items(&dir, SESSION_A, &[
+        (ITEM_WP_S, "work_package", "Sprint Alpha"),
+        (ITEM_SH_S, "stakeholder", "Alice Stakeholder"),
+    ]);
+    seed_task_added_s(&dir, TASK_ID_S1, ITEM_WP_S, "TODO", "TBD", None, None);
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+    write_page_with_task_new_format(
+        &graph_dir, ITEM_WP_S, "sprint-alpha", TASK_ID_S1,
+        "TODO", "Review auth checklist", "alice-stakeholder",
+        None, None,
+    );
+    // Stakeholder page must exist so page_name_to_item can resolve [[alice-stakeholder]]
+    let pages_dir = std::path::Path::new(&graph_dir).join("pages");
+    fs::write(
+        pages_dir.join("alice-stakeholder.md"),
+        format!("type:: stakeholder\n\n- item-id: {}\n", ITEM_SH_S),
+    ).unwrap();
+
+    run_binary_isolated(&dir, &graph_dir);
+
+    let events = read_task_sync_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(
+        types.contains(&"TaskOwnerUpdated"),
+        "New-format task block: [[alice-stakeholder]] vs TBD must emit TaskOwnerUpdated"
+    );
+    let upd = events.iter().find(|e| e["event_type"] == "TaskOwnerUpdated").unwrap();
+    assert_eq!(upd["payload"]["task_id"].as_str().unwrap(), TASK_ID_S1);
+    assert_eq!(upd["payload"]["new_owner_id"].as_str().unwrap(), ITEM_SH_S);
+}
+
+#[test]
+fn test_sync_new_format_task_dates_change_emits_task_dates_updated() {
+    let dir = setup_dir_with_block_schema();
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_WP_S, "work_package", "Sprint Alpha")]);
+    seed_task_added_s(&dir, TASK_ID_S1, ITEM_WP_S, "TODO", "TBD", None, None);
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+    // <2026-06-20 Sat> — parse_logseq_date must extract "2026-06-20"
+    write_page_with_task_new_format(
+        &graph_dir, ITEM_WP_S, "sprint-alpha", TASK_ID_S1,
+        "TODO", "Review auth checklist", "TBD",
+        Some("<2026-06-20 Sat>"),
+        None,
+    );
+
+    run_binary_isolated(&dir, &graph_dir);
+
+    let events = read_task_sync_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(
+        types.contains(&"TaskDatesUpdated"),
+        "New-format task block: SCHEDULED line must emit TaskDatesUpdated"
+    );
+    let upd = events.iter().find(|e| e["event_type"] == "TaskDatesUpdated").unwrap();
+    assert_eq!(upd["payload"]["task_id"].as_str().unwrap(), TASK_ID_S1);
+    assert_eq!(upd["payload"]["new_scheduled_date"].as_str().unwrap(), "2026-06-20");
+}
+
+#[test]
+fn test_sync_old_format_task_still_parseable() {
+    let dir = setup_dir_with_block_schema();
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_WP_S, "work_package", "Sprint Alpha")]);
+    seed_task_added_s(&dir, TASK_ID_S1, ITEM_WP_S, "TODO", "TBD", None, None);
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    // Old format: inline task-id in the bullet line
+    let pages_dir = std::path::Path::new(&graph_dir).join("pages");
+    fs::create_dir_all(&pages_dir).unwrap();
+    let content = format!(
+        "type:: work_package\nstatus:: not-set\npriority:: not-set\ntags:: work_package\n\n- item-id: {}\n\n- DOING task-id: {} Review auth checklist\n",
+        ITEM_WP_S, TASK_ID_S1
+    );
+    fs::write(pages_dir.join("sprint-alpha.md"), content).unwrap();
+
+    run_binary_isolated(&dir, &graph_dir);
+
+    let events = read_task_sync_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(
+        types.contains(&"TaskMarkerUpdated"),
+        "Old-format task block (inline task-id:) must still emit TaskMarkerUpdated"
+    );
+}
+
+#[test]
+fn test_sync_new_format_block_without_task_id_silently_skipped() {
+    let dir = setup_dir_with_block_schema();
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_WP_S, "work_package", "Sprint Alpha")]);
+    let graph_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    // Block with :PROPERTIES: but no :task-id: — should be silently skipped
+    let pages_dir = std::path::Path::new(&graph_dir).join("pages");
+    fs::create_dir_all(&pages_dir).unwrap();
+    let content = format!(
+        "type:: work_package\nstatus:: not-set\npriority:: not-set\ntags:: work_package\n\n- item-id: {}\n\n- TODO Some task [[TBD]]\n  :PROPERTIES:\n  :some-other-prop: value\n  :END:\n",
+        ITEM_WP_S
+    );
+    fs::write(pages_dir.join("sprint-alpha.md"), content).unwrap();
+
+    run_binary_isolated(&dir, &graph_dir);
+
+    let events = read_task_sync_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+    assert!(
+        !types.contains(&"TaskMarkerUpdated"),
+        "Task block without :task-id: must be silently skipped"
+    );
+    assert!(
+        !types.contains(&"TaskOwnerUpdated"),
+        "Task block without :task-id: must be silently skipped"
+    );
+}

@@ -26,6 +26,13 @@ Specifically:
 - PM can see the current status and priority of each item in Logseq
 - PM can navigate between related items using Logseq's linking model
 - PM can re-export at any time to refresh Logseq with the latest project state
+- PM can see each task instance's current marker, owner, and scheduling dates
+  rendered inline as a native Logseq task block
+- PM can navigate directly from a task to its assigned stakeholder via
+  Logseq's page reference model
+- PM can see work package relations (assignments, dependencies) as Logseq
+  page properties rather than content sections, making them queryable and
+  navigable across the graph
 
 ## Stable Guarantees
 
@@ -35,6 +42,8 @@ Specifically:
 - Exported pages reflect only information present in the project record —
   nothing is invented or inferred beyond what is already recorded
 - Every item currently in the project record appears in the exported output
+- Exported task blocks embed a stable identity in a hidden metadata drawer so
+  that logseq_sync can match them back to the correct task record item
 
 ## Scope Boundary
 
@@ -44,6 +53,8 @@ This feature does NOT:
   (that is logseq_sync)
 - Create, remove, or alter items in the project record
 - Enforce how the PM organises their Logseq graph beyond the pages it writes
+- Define the sync matching logic for the new task block format —
+  that is logseq_sync's concern (updated in the same refinement)
 
 ---
 

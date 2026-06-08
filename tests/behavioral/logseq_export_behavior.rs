@@ -705,3 +705,345 @@ fn test_separate_invocations_have_different_correlation_ids() {
     assert_ne!(cids[0], cids[1],
         "Different invocations must produce different correlation_ids");
 }
+
+// ── R_export_format: task block format and work package page properties ───────
+
+const WP_SCHEMA: &str = r#"schemaVersion: 1
+statuses:
+  todo:
+  doing:
+  done:
+  active:
+  inactive:
+pageTypes:
+  work_package:
+    allowedStatuses: [todo, doing, done]
+  stakeholder:
+    allowedStatuses: [active, inactive]
+blockTypes:
+  task_block:
+    markers:
+      TODO: todo
+      DOING: doing
+      DONE: done
+relations:
+  assigned_to:
+    source: [work_package]
+    target: [stakeholder]
+  blocks:
+    source: [work_package]
+    target: [work_package]
+renderers:
+  logseq:
+    relations:
+      assigned_to:
+        forwardLabel: "Assigned To"
+        inverseLabel: "Owns"
+      blocks:
+        forwardLabel: "Blocking"
+        inverseLabel: "Blocked By"
+"#;
+
+const ITEM_WP:   &str = "00000001-0000-0000-0000-000000000001";
+const ITEM_WP2:  &str = "00000001-0000-0000-0000-000000000002";
+const ITEM_SH:   &str = "00000001-0000-0000-0000-000000000003";
+const TASK_ID_1: &str = "10000001-0000-0000-0000-000000000001";
+
+fn write_schema_file(dir: &TempDir, yaml: &str) {
+    fs::write(dir.path().join("project-schema.yaml"), yaml).unwrap();
+}
+
+fn run_binary_isolated(dir: &TempDir, output_dir: &str) -> std::process::Output {
+    Command::new(binary_path())
+        .current_dir(dir.path())
+        .args(["--output-dir", output_dir])
+        .env("HOME", dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("Failed to run binary")
+}
+
+fn seed_task_added(
+    dir: &TempDir,
+    task_id: &str,
+    parent_id: &str,
+    marker: &str,
+    owner_id: &str,
+    scheduled_date: Option<&str>,
+    deadline: Option<&str>,
+) {
+    let event = json!({
+        "event_id":       format!("seed-task-{}", &task_id[..8]),
+        "event_type":     "TaskAdded",
+        "timestamp":      1748000010000u64,
+        "correlation_id": "00000000-0000-0000-0000-000000000099",
+        "source_module":  "task_model",
+        "payload": {
+            "task_id":        task_id,
+            "item_type":      "task_block",
+            "description":    "Test task",
+            "parent_item_id": parent_id,
+            "initial_marker": marker,
+            "owner_id":       owner_id,
+            "scheduled_date": scheduled_date,
+            "deadline":       deadline,
+        }
+    });
+    let path = dir.path().join("events/runtime_events.jsonl");
+    let mut file = fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
+    writeln!(file, "{}", event).unwrap();
+}
+
+fn seed_item_linked(dir: &TempDir, source_id: &str, link_type: &str, target_id: &str) {
+    let event = json!({
+        "event_id":       format!("seed-link-{}-{}", &source_id[..8], &target_id[..8]),
+        "event_type":     "ItemLinked",
+        "timestamp":      1748000011000u64,
+        "correlation_id": "00000000-0000-0000-0000-000000000099",
+        "source_module":  "item_links",
+        "payload": {
+            "source_id": source_id,
+            "link_type": link_type,
+            "target_id": target_id,
+        }
+    });
+    let path = dir.path().join("events/runtime_events.jsonl");
+    let mut file = fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
+    writeln!(file, "{}", event).unwrap();
+}
+
+#[test]
+fn test_task_block_line_has_marker_description_owner() {
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_WP, "work_package", "Sprint Alpha", None, None),
+          (ITEM_SH, "stakeholder", "Alice Stakeholder", None, None)],
+    );
+    seed_task_added(&dir, TASK_ID_1, ITEM_WP, "TODO", ITEM_SH, None, None);
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let content = fs::read_to_string(page_path(&output_dir, "sprint-alpha"))
+        .expect("sprint-alpha.md must exist");
+    assert!(
+        content.contains("- TODO Test task [[alice-stakeholder]]"),
+        "Task block line must be '- MARKER description [[owner-slug]]', got:\n{}",
+        content
+    );
+}
+
+#[test]
+fn test_task_block_has_properties_drawer_with_task_id() {
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_WP, "work_package", "Sprint Alpha", None, None),
+          (ITEM_SH, "stakeholder", "Alice Stakeholder", None, None)],
+    );
+    seed_task_added(&dir, TASK_ID_1, ITEM_WP, "TODO", ITEM_SH, None, None);
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let content = fs::read_to_string(page_path(&output_dir, "sprint-alpha"))
+        .expect("sprint-alpha.md must exist");
+    assert!(content.contains("  :PROPERTIES:"), "Task block must contain :PROPERTIES:");
+    assert!(
+        content.contains(&format!("  :task-id: {}", TASK_ID_1)),
+        "Task block must contain :task-id: <uuid>"
+    );
+    assert!(content.contains("  :END:"), "Task block must contain :END:");
+}
+
+#[test]
+fn test_task_block_has_no_tasks_section_header() {
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_WP, "work_package", "Sprint Alpha", None, None)],
+    );
+    seed_task_added(&dir, TASK_ID_1, ITEM_WP, "TODO", "TBD", None, None);
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let content = fs::read_to_string(page_path(&output_dir, "sprint-alpha"))
+        .expect("sprint-alpha.md must exist");
+    assert!(
+        !content.contains("- Tasks\n"),
+        "New task block format must NOT include a '- Tasks' section header"
+    );
+}
+
+#[test]
+fn test_task_block_tbd_owner_renders_tbd_ref() {
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_WP, "work_package", "Sprint Alpha", None, None)]);
+    seed_task_added(&dir, TASK_ID_1, ITEM_WP, "TODO", "TBD", None, None);
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let content = fs::read_to_string(page_path(&output_dir, "sprint-alpha"))
+        .expect("sprint-alpha.md must exist");
+    assert!(
+        content.contains("[[TBD]]"),
+        "TBD-owned task must render [[TBD]] in the block line"
+    );
+}
+
+#[test]
+fn test_task_block_no_dates_omits_scheduled_and_deadline_lines() {
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_WP, "work_package", "Sprint Alpha", None, None)]);
+    seed_task_added(&dir, TASK_ID_1, ITEM_WP, "TODO", "TBD", None, None);
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let content = fs::read_to_string(page_path(&output_dir, "sprint-alpha"))
+        .expect("sprint-alpha.md must exist");
+    assert!(!content.contains("SCHEDULED:"), "No SCHEDULED line when task has no scheduled_date");
+    assert!(!content.contains("DEADLINE:"),  "No DEADLINE line when task has no deadline");
+}
+
+#[test]
+fn test_task_block_with_dates_renders_logseq_date_format() {
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_WP, "work_package", "Sprint Alpha", None, None)]);
+    seed_task_added(&dir, TASK_ID_1, ITEM_WP, "DOING", "TBD", Some("2026-06-15"), Some("2026-06-30"));
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let content = fs::read_to_string(page_path(&output_dir, "sprint-alpha"))
+        .expect("sprint-alpha.md must exist");
+    assert!(
+        content.contains("  SCHEDULED: <2026-06-15 Mon>"),
+        "SCHEDULED must use Logseq date format <YYYY-MM-DD DDD>"
+    );
+    assert!(
+        content.contains("  DEADLINE: <2026-06-30 Tue>"),
+        "DEADLINE must use Logseq date format <YYYY-MM-DD DDD>"
+    );
+}
+
+#[test]
+fn test_work_package_assigned_to_renders_as_page_property() {
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_WP, "work_package", "Sprint Alpha", None, None),
+          (ITEM_SH, "stakeholder", "Alice Stakeholder", None, None)],
+    );
+    seed_item_linked(&dir, ITEM_WP, "assigned_to", ITEM_SH);
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let content = fs::read_to_string(page_path(&output_dir, "sprint-alpha"))
+        .expect("sprint-alpha.md must exist");
+    assert!(
+        content.contains("assigned-to:: [[alice-stakeholder]]"),
+        "Work package must render assigned_to as 'assigned-to::' page property, got:\n{}",
+        content
+    );
+    assert!(
+        !content.contains("- Assigned To"),
+        "Work package must NOT render assigned_to as a content section"
+    );
+}
+
+#[test]
+fn test_work_package_blocking_renders_as_page_property() {
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_WP, "work_package", "Sprint Alpha", None, None),
+          (ITEM_WP2, "work_package", "Infrastructure Setup", None, None)],
+    );
+    seed_item_linked(&dir, ITEM_WP, "blocks", ITEM_WP2);
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let content = fs::read_to_string(page_path(&output_dir, "sprint-alpha"))
+        .expect("sprint-alpha.md must exist");
+    assert!(
+        content.contains("blocking:: [[infrastructure-setup]]"),
+        "Work package must render blocks (outgoing) as 'blocking::' page property, got:\n{}",
+        content
+    );
+    assert!(
+        !content.contains("- Blocking"),
+        "Work package must NOT render blocks relation as a content section"
+    );
+}
+
+#[test]
+fn test_work_package_multiple_blocked_by_space_separated_on_one_property_line() {
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    const ITEM_WP3: &str = "00000001-0000-0000-0000-000000000004";
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_WP, "work_package", "Sprint Alpha", None, None),
+          (ITEM_WP2, "work_package", "Infrastructure Setup", None, None),
+          (ITEM_WP3, "work_package", "Mobile Backend", None, None)],
+    );
+    seed_item_linked(&dir, ITEM_WP2, "blocks", ITEM_WP);
+    seed_item_linked(&dir, ITEM_WP3, "blocks", ITEM_WP);
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let content = fs::read_to_string(page_path(&output_dir, "sprint-alpha"))
+        .expect("sprint-alpha.md must exist");
+    let blocked_line = content.lines().find(|l| l.starts_with("blocked-by::"));
+    assert!(blocked_line.is_some(), "sprint-alpha page must have a blocked-by:: property line");
+    let bl = blocked_line.unwrap();
+    assert!(
+        bl.contains("[[infrastructure-setup]]") && bl.contains("[[mobile-backend]]"),
+        "Both blocked-by targets must appear on one 'blocked-by::' line, got: {}",
+        bl
+    );
+}
+
+#[test]
+fn test_non_work_package_relations_remain_content_sections() {
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_WP, "work_package", "Sprint Alpha", None, None),
+          (ITEM_SH, "stakeholder", "Alice Stakeholder", None, None)],
+    );
+    seed_item_linked(&dir, ITEM_WP, "assigned_to", ITEM_SH);
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    // Stakeholder page (non-work-package) must use content sections for its inverse relation
+    let content = fs::read_to_string(page_path(&output_dir, "alice-stakeholder"))
+        .expect("alice-stakeholder.md must exist");
+    assert!(
+        content.contains("- Owns"),
+        "Non-work-package items must render inverse relations as '- Label' content sections"
+    );
+    assert!(
+        !content.contains("owns::"),
+        "Non-work-package items must NOT render relations as page properties"
+    );
+}

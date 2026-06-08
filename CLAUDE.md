@@ -57,6 +57,8 @@ planned and in-progress work, the backlog is the authoritative source.
 | lucid | unified CLI entry point; dispatcher owns help text; no event emission; UnknownCommand failure mode | 9 | COMPLETE |
 | lucid_sync_enforcement | install-set → dispatcher coverage check; runs in lucid test suite; no runtime behavior change | 9 | COMPLETE |
 | demo | self-contained demo project + Logseq graph + WALKTHROUGH.md; from-scratch workflow; all major features | 9 | COMPLETE |
+| R_task_scheduling + R_task_ownership (task_model + logseq_sync) | required owner (stakeholder item or TBD sentinel); optional scheduled/deadline dates; bidirectional Logseq sync for owner and dates | 9 | COMPLETE |
+| R_export_format (logseq_export + logseq_sync) | task blocks as native Logseq task blocks with :PROPERTIES: drawer; work package relations as page properties; dual-format sync parser | 9 | COMPLETE |
 
 Stages: 1-Intent / 2-Contract / 3-Schema / 4-Implement / 5-Tests / 6-Observe / 7-Reconcile / 8-Replay / 9-Refine
 

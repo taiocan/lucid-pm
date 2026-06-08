@@ -19,12 +19,12 @@ fn task_model_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_task_model"))
 }
 
-/// Access sibling module binaries. Each module builds to its own target/debug.
-/// CARGO_MANIFEST_DIR for task_model = <project_root>/modules/task_model
+/// Access sibling module binaries. All modules build to the workspace target directory.
+/// CARGO_MANIFEST_DIR for task_model = <workspace_root>/task_model
 fn sibling_bin(name: &str) -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let project_root = manifest.parent().unwrap().parent().unwrap();
-    project_root.join("modules").join(name).join("target/debug").join(name)
+    let workspace_root = manifest.parent().unwrap(); // modules/
+    workspace_root.join("target/debug").join(name)
 }
 
 // ── Schema constants ──────────────────────────────────────────────────────────
@@ -1248,4 +1248,654 @@ fn test_identity_invariant_different_ids_are_distinct_tasks_falsifies_desc_paren
     assert_eq!(review_docs_items.len(), 2,
         "Two task instances with same description but different task_ids must both appear; \
          wrong impl uses description+parent as identity and collapses them into 1");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Stage 5 — Ownership, Scheduling, and Owner Sync Tests
+// (task_model_schema.md: TaskOwnerUpdated, TaskDatesUpdated, TaskAddFailedOwnerNotFound)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const STAKEHOLDER_ID: &str = "eeeeeeee-aaaa-bbbb-cccc-ffffffffffff";
+
+/// Seed a TaskAdded event that includes the new owner_id, scheduled_date, and deadline fields.
+fn seed_task_added_with_owner(
+    dir: &TempDir,
+    task_id: &str,
+    item_type: &str,
+    description: &str,
+    parent_id: &str,
+    initial_marker: &str,
+    owner_id: &str,
+    scheduled_date: Option<&str>,
+    deadline: Option<&str>,
+) {
+    let path = events_path(dir);
+    let mut file = fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
+    let event = json!({
+        "event_id": format!("seed-task-{}", &task_id[..8]),
+        "event_type": "TaskAdded",
+        "timestamp": 1748000010000u64,
+        "correlation_id": "00000000-0000-0000-0000-000000000099",
+        "source_module": "task_model",
+        "payload": {
+            "task_id": task_id,
+            "item_type": item_type,
+            "description": description,
+            "parent_item_id": parent_id,
+            "initial_marker": initial_marker,
+            "owner_id": owner_id,
+            "scheduled_date": scheduled_date,
+            "deadline": deadline,
+        }
+    });
+    writeln!(file, "{}", event).unwrap();
+}
+
+/// Write a Logseq page for any named entity (stakeholder or work item).
+/// The page stem is the filename without .md (used for [[ref]] resolution in sync).
+fn write_logseq_page(logseq_dir: &std::path::Path, filename: &str, item_id: &str, body: &str) {
+    let content = format!("- item-id: {}\n{}", item_id, body);
+    fs::write(logseq_dir.join("pages").join(filename), content).unwrap();
+}
+
+// ── HP8: Task created with named owner ────────────────────────────────────────
+
+#[test]
+fn test_task_add_with_owner_assigns_specified_owner_id() {
+    let dir = setup_dir();
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Launch v1.0");
+    seed_parent_item(&dir, STAKEHOLDER_ID, "milestone", "Maria stakeholder");
+
+    run_task_model(&dir, &[
+        "add", "--description", "Review spec",
+        "--parent", PARENT_ID,
+        "--owner", STAKEHOLDER_ID,
+    ]);
+
+    let events = read_task_events(&dir);
+    let added = events.iter().find(|e| e["event_type"] == "TaskAdded").expect("TaskAdded must be emitted");
+
+    assert_eq!(added["payload"]["owner_id"].as_str().unwrap(), STAKEHOLDER_ID,
+        "TaskAdded.owner_id must equal the specified --owner value");
+}
+
+#[test]
+fn test_task_add_requested_carries_specified_owner_id() {
+    let dir = setup_dir();
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+    seed_parent_item(&dir, STAKEHOLDER_ID, "milestone", "Owner");
+
+    run_task_model(&dir, &[
+        "add", "--description", "Task X",
+        "--parent", PARENT_ID,
+        "--owner", STAKEHOLDER_ID,
+    ]);
+
+    let events = read_task_events(&dir);
+    let req = events.iter().find(|e| e["event_type"] == "TaskAddRequested")
+        .expect("TaskAddRequested must be emitted");
+
+    assert_eq!(req["payload"]["requested_owner_id"].as_str().unwrap(), STAKEHOLDER_ID,
+        "TaskAddRequested.requested_owner_id must carry the specified --owner value");
+}
+
+// ── HP9: Task created without owner → TBD placeholder ─────────────────────────
+
+#[test]
+fn test_task_add_without_owner_assigns_tbd_placeholder() {
+    let dir = setup_dir();
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Launch v1.0");
+
+    run_task_model(&dir, &["add", "--description", "Write docs", "--parent", PARENT_ID]);
+
+    let events = read_task_events(&dir);
+    let added = events.iter().find(|e| e["event_type"] == "TaskAdded").expect("TaskAdded must be emitted");
+
+    assert_eq!(added["payload"]["owner_id"].as_str().unwrap(), "TBD",
+        "TaskAdded.owner_id must be 'TBD' when --owner is not specified");
+}
+
+#[test]
+fn test_task_add_requested_has_null_owner_when_unspecified() {
+    let dir = setup_dir();
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+
+    run_task_model(&dir, &["add", "--description", "Fix bug", "--parent", PARENT_ID]);
+
+    let events = read_task_events(&dir);
+    let req = events.iter().find(|e| e["event_type"] == "TaskAddRequested")
+        .expect("TaskAddRequested must be emitted");
+
+    assert!(req["payload"]["requested_owner_id"].is_null(),
+        "TaskAddRequested.requested_owner_id must be null when --owner is not specified");
+}
+
+// ── HP10: Task created with scheduling dates ───────────────────────────────────
+
+#[test]
+fn test_task_add_with_dates_includes_dates_in_payload() {
+    let dir = setup_dir();
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Launch v1.0");
+
+    run_task_model(&dir, &[
+        "add", "--description", "Design review",
+        "--parent", PARENT_ID,
+        "--scheduled", "2026-06-15",
+        "--deadline", "2026-06-30",
+    ]);
+
+    let events = read_task_events(&dir);
+    let added = events.iter().find(|e| e["event_type"] == "TaskAdded").expect("TaskAdded must be emitted");
+
+    assert_eq!(added["payload"]["scheduled_date"].as_str().unwrap(), "2026-06-15",
+        "TaskAdded.scheduled_date must match --scheduled value");
+    assert_eq!(added["payload"]["deadline"].as_str().unwrap(), "2026-06-30",
+        "TaskAdded.deadline must match --deadline value");
+}
+
+// ── BS5: Task without dates has null date fields ───────────────────────────────
+
+#[test]
+fn test_task_add_without_dates_has_null_dates_in_payload() {
+    let dir = setup_dir();
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+
+    run_task_model(&dir, &["add", "--description", "Undated task", "--parent", PARENT_ID]);
+
+    let events = read_task_events(&dir);
+    let added = events.iter().find(|e| e["event_type"] == "TaskAdded").expect("TaskAdded must be emitted");
+
+    assert!(added["payload"]["scheduled_date"].is_null(),
+        "TaskAdded.scheduled_date must be null when --scheduled is not specified");
+    assert!(added["payload"]["deadline"].is_null(),
+        "TaskAdded.deadline must be null when --deadline is not specified");
+}
+
+// ── TaskAdded / TaskAddRequested payload shape with new fields ────────────────
+
+#[test]
+fn test_task_added_payload_includes_owner_id_and_date_fields() {
+    let dir = setup_dir();
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+
+    run_task_model(&dir, &["add", "--description", "Check schema", "--parent", PARENT_ID]);
+
+    let events = read_task_events(&dir);
+    let added = events.iter().find(|e| e["event_type"] == "TaskAdded").expect("TaskAdded must be emitted");
+    let p = &added["payload"];
+
+    assert!(p.get("owner_id").is_some(),       "TaskAdded payload must contain owner_id");
+    assert!(p.get("scheduled_date").is_some(), "TaskAdded payload must contain scheduled_date");
+    assert!(p.get("deadline").is_some(),       "TaskAdded payload must contain deadline");
+    assert!(p["owner_id"].as_str().is_some(),  "TaskAdded.owner_id must be a string (never null)");
+}
+
+#[test]
+fn test_task_add_requested_payload_includes_new_fields() {
+    let dir = setup_dir();
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+
+    run_task_model(&dir, &["add", "--description", "Check schema", "--parent", PARENT_ID]);
+
+    let events = read_task_events(&dir);
+    let req = events.iter().find(|e| e["event_type"] == "TaskAddRequested")
+        .expect("TaskAddRequested must be emitted");
+    let p = &req["payload"];
+
+    assert!(p.get("requested_owner_id").is_some(),       "TaskAddRequested must contain requested_owner_id");
+    assert!(p.get("requested_scheduled_date").is_some(), "TaskAddRequested must contain requested_scheduled_date");
+    assert!(p.get("requested_deadline").is_some(),       "TaskAddRequested must contain requested_deadline");
+}
+
+// ── FP5: TaskAddFailedOwnerNotFound ───────────────────────────────────────────
+
+#[test]
+fn test_task_add_with_unknown_owner_emits_owner_not_found() {
+    let dir = setup_dir();
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+
+    let unknown_owner = "00000000-dead-dead-dead-000000000000";
+    run_task_model(&dir, &[
+        "add", "--description", "Ghost task",
+        "--parent", PARENT_ID,
+        "--owner", unknown_owner,
+    ]);
+
+    let events = read_task_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"TaskAddFailedOwnerNotFound"),
+        "TaskAddFailedOwnerNotFound must be emitted when owner item does not exist");
+    assert!(!types.contains(&"TaskAdded"),
+        "TaskAdded must NOT be emitted when owner not found");
+}
+
+#[test]
+fn test_task_add_owner_not_found_failure_reason_and_payload() {
+    let dir = setup_dir();
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+
+    let unknown_owner = "00000000-dead-dead-dead-000000000000";
+    run_task_model(&dir, &[
+        "add", "--description", "Ghost task",
+        "--parent", PARENT_ID,
+        "--owner", unknown_owner,
+    ]);
+
+    let events = read_task_events(&dir);
+    let failure = events.iter()
+        .find(|e| e["event_type"] == "TaskAddFailedOwnerNotFound")
+        .expect("TaskAddFailedOwnerNotFound must be emitted");
+
+    assert_eq!(failure["payload"]["failure_reason"].as_str().unwrap(), "owner_not_found");
+    assert_eq!(failure["payload"]["owner_id"].as_str().unwrap(), unknown_owner,
+        "owner_id in failure payload must match the rejected --owner value");
+}
+
+#[test]
+fn test_task_add_owner_not_found_is_preceded_by_requested() {
+    let dir = setup_dir();
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+
+    let unknown_owner = "00000000-dead-dead-dead-000000000000";
+    run_task_model(&dir, &[
+        "add", "--description", "Ghost task",
+        "--parent", PARENT_ID,
+        "--owner", unknown_owner,
+    ]);
+
+    let events = read_task_events(&dir);
+    let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+
+    assert!(types.contains(&"TaskAddRequested"),
+        "TaskAddRequested must be emitted before TaskAddFailedOwnerNotFound");
+    let req_pos = types.iter().position(|&t| t == "TaskAddRequested").unwrap();
+    let fail_pos = types.iter().position(|&t| t == "TaskAddFailedOwnerNotFound").unwrap();
+    assert!(req_pos < fail_pos, "TaskAddRequested must precede TaskAddFailedOwnerNotFound");
+}
+
+#[test]
+fn test_task_add_owner_not_found_no_task_added_in_record() {
+    // The task must not appear in the project record when owner validation fails.
+    // Exit code is 0 (consistent with all failure paths) — events are the signal.
+    let dir = setup_dir();
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+
+    run_task_model(&dir, &[
+        "add", "--description", "Ghost task",
+        "--parent", PARENT_ID,
+        "--owner", "00000000-dead-dead-dead-000000000000",
+    ]);
+
+    let events = read_task_events(&dir);
+    let task_added_count = events.iter().filter(|e| e["event_type"] == "TaskAdded").count();
+    assert_eq!(task_added_count, 0,
+        "No TaskAdded must be emitted when owner validation fails — task must not enter record");
+}
+
+// ── TBD sentinel: explicit TBD arg is accepted ────────────────────────────────
+
+#[test]
+fn test_tbd_as_explicit_owner_bypasses_existence_check() {
+    let dir = setup_dir();
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+    // No stakeholder seeded for "TBD" — yet it must succeed
+
+    let out = run_task_model(&dir, &[
+        "add", "--description", "TBD-owned task",
+        "--parent", PARENT_ID,
+        "--owner", "TBD",
+    ]);
+
+    assert!(out.status.success(), "task add with --owner TBD must succeed without seeding TBD as an item");
+
+    let events = read_task_events(&dir);
+    let added = events.iter().find(|e| e["event_type"] == "TaskAdded").expect("TaskAdded must be emitted");
+    assert_eq!(added["payload"]["owner_id"].as_str().unwrap(), "TBD");
+}
+
+// ── HP11: Ownership change synced from Logseq ────────────────────────────────
+
+#[test]
+fn test_sync_owner_change_emits_task_owner_updated() {
+    let dir = setup_dir();
+    let logseq_dir = dir.path().join("logseq");
+    fs::create_dir_all(logseq_dir.join("pages")).unwrap();
+
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+    seed_parent_item(&dir, STAKEHOLDER_ID, "milestone", "Maria");
+    seed_task_added_with_owner(&dir, TASK_ID_A, "task", "Review spec", PARENT_ID, "TODO",
+                               "TBD", None, None);
+
+    // Parent page: task block with [[Maria]] as owner (was TBD)
+    write_logseq_page(&logseq_dir, "sprint-goal.md", PARENT_ID,
+        &format!("- TODO task-id: {} Review spec [[Maria]]\n", TASK_ID_A));
+    // Stakeholder page for owner resolution
+    write_logseq_page(&logseq_dir, "Maria.md", STAKEHOLDER_ID, "");
+
+    run_binary("logseq_sync", &dir, &["--graph", "logseq"]);
+
+    let all = read_all_events(&dir);
+    let owner_updated = all.iter()
+        .find(|e| e["source_module"].as_str() == Some("task_model")
+               && e["event_type"].as_str() == Some("TaskOwnerUpdated")
+               && e["payload"]["task_id"].as_str() == Some(TASK_ID_A));
+
+    assert!(owner_updated.is_some(), "TaskOwnerUpdated must be emitted when [[owner]] changes in Logseq");
+}
+
+#[test]
+fn test_sync_owner_updated_payload_shape() {
+    let dir = setup_dir();
+    let logseq_dir = dir.path().join("logseq");
+    fs::create_dir_all(logseq_dir.join("pages")).unwrap();
+
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+    seed_parent_item(&dir, STAKEHOLDER_ID, "milestone", "Maria");
+    seed_task_added_with_owner(&dir, TASK_ID_A, "task", "Review spec", PARENT_ID, "TODO",
+                               "TBD", None, None);
+
+    write_logseq_page(&logseq_dir, "sprint-goal.md", PARENT_ID,
+        &format!("- TODO task-id: {} Review spec [[Maria]]\n", TASK_ID_A));
+    write_logseq_page(&logseq_dir, "Maria.md", STAKEHOLDER_ID, "");
+
+    run_binary("logseq_sync", &dir, &["--graph", "logseq"]);
+
+    let all = read_all_events(&dir);
+    let event = all.iter()
+        .find(|e| e["source_module"].as_str() == Some("task_model")
+               && e["event_type"].as_str() == Some("TaskOwnerUpdated"))
+        .expect("TaskOwnerUpdated must be emitted");
+
+    let p = &event["payload"];
+    assert_eq!(p["task_id"].as_str().unwrap(), TASK_ID_A);
+    assert_eq!(p["previous_owner_id"].as_str().unwrap(), "TBD",
+        "previous_owner_id must be TBD (the initial owner)");
+    assert_eq!(p["new_owner_id"].as_str().unwrap(), STAKEHOLDER_ID,
+        "new_owner_id must resolve to the stakeholder's item_id from the Logseq page");
+}
+
+// ── HP12: Date changes synced from Logseq ─────────────────────────────────────
+
+#[test]
+fn test_sync_date_change_emits_task_dates_updated() {
+    let dir = setup_dir();
+    let logseq_dir = dir.path().join("logseq");
+    fs::create_dir_all(logseq_dir.join("pages")).unwrap();
+
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+    seed_task_added_with_owner(&dir, TASK_ID_A, "task", "Plan sprint", PARENT_ID, "TODO",
+                               "TBD", None, None);
+
+    // Task block now has SCHEDULED and DEADLINE lines
+    let task_block = format!(
+        "- TODO task-id: {} Plan sprint\n  SCHEDULED: <2026-06-15 Mon>\n  DEADLINE: <2026-06-30 Tue>\n",
+        TASK_ID_A
+    );
+    write_logseq_page(&logseq_dir, "sprint-goal.md", PARENT_ID, &task_block);
+
+    run_binary("logseq_sync", &dir, &["--graph", "logseq"]);
+
+    let all = read_all_events(&dir);
+    let dates_updated = all.iter()
+        .find(|e| e["source_module"].as_str() == Some("task_model")
+               && e["event_type"].as_str() == Some("TaskDatesUpdated")
+               && e["payload"]["task_id"].as_str() == Some(TASK_ID_A));
+
+    assert!(dates_updated.is_some(), "TaskDatesUpdated must be emitted when SCHEDULED/DEADLINE changes");
+}
+
+#[test]
+fn test_sync_dates_updated_payload_shape() {
+    let dir = setup_dir();
+    let logseq_dir = dir.path().join("logseq");
+    fs::create_dir_all(logseq_dir.join("pages")).unwrap();
+
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+    seed_task_added_with_owner(&dir, TASK_ID_A, "task", "Plan sprint", PARENT_ID, "TODO",
+                               "TBD", None, None);
+
+    let task_block = format!(
+        "- TODO task-id: {} Plan sprint\n  SCHEDULED: <2026-06-15 Mon>\n  DEADLINE: <2026-06-30 Tue>\n",
+        TASK_ID_A
+    );
+    write_logseq_page(&logseq_dir, "sprint-goal.md", PARENT_ID, &task_block);
+
+    run_binary("logseq_sync", &dir, &["--graph", "logseq"]);
+
+    let all = read_all_events(&dir);
+    let event = all.iter()
+        .find(|e| e["source_module"].as_str() == Some("task_model")
+               && e["event_type"].as_str() == Some("TaskDatesUpdated"))
+        .expect("TaskDatesUpdated must be emitted");
+
+    let p = &event["payload"];
+    assert_eq!(p["task_id"].as_str().unwrap(), TASK_ID_A);
+    assert!(p["previous_scheduled_date"].is_null(),   "previous_scheduled_date must be null (was unset)");
+    assert!(p["previous_deadline"].is_null(),         "previous_deadline must be null (was unset)");
+    assert_eq!(p["new_scheduled_date"].as_str().unwrap(), "2026-06-15",
+        "new_scheduled_date must be parsed ISO date from SCHEDULED: line");
+    assert_eq!(p["new_deadline"].as_str().unwrap(), "2026-06-30",
+        "new_deadline must be parsed ISO date from DEADLINE: line");
+}
+
+// ── BS7: Sync with unresolvable owner reference ───────────────────────────────
+
+#[test]
+fn test_sync_unresolvable_owner_reference_no_event() {
+    let dir = setup_dir();
+    let logseq_dir = dir.path().join("logseq");
+    fs::create_dir_all(logseq_dir.join("pages")).unwrap();
+
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+    seed_task_added_with_owner(&dir, TASK_ID_A, "task", "Orphan task", PARENT_ID, "TODO",
+                               "TBD", None, None);
+
+    // Page references [[Phantomname]] — no Logseq page with that stem exists
+    write_logseq_page(&logseq_dir, "sprint-goal.md", PARENT_ID,
+        &format!("- TODO task-id: {} Orphan task [[Phantomname]]\n", TASK_ID_A));
+    // No Phantomname.md file — unresolvable reference
+
+    run_binary("logseq_sync", &dir, &["--graph", "logseq"]);
+
+    let all = read_all_events(&dir);
+    let owner_updated = all.iter().any(|e|
+        e["source_module"].as_str() == Some("task_model")
+        && e["event_type"].as_str() == Some("TaskOwnerUpdated")
+        && e["payload"]["task_id"].as_str() == Some(TASK_ID_A));
+
+    assert!(!owner_updated,
+        "TaskOwnerUpdated must NOT be emitted when [[owner]] reference cannot be resolved");
+}
+
+#[test]
+fn test_sync_unresolvable_owner_does_not_abort_sync() {
+    let dir = setup_dir();
+    let logseq_dir = dir.path().join("logseq");
+    fs::create_dir_all(logseq_dir.join("pages")).unwrap();
+
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+    seed_task_added_with_owner(&dir, TASK_ID_A, "task", "Orphan task", PARENT_ID, "TODO",
+                               "TBD", None, None);
+    seed_task_added_with_owner(&dir, TASK_ID_B, "task", "Normal task", PARENT_ID, "TODO",
+                               "TBD", None, None);
+
+    // Task A: unresolvable owner; Task B: marker changes (no owner reference)
+    let page_content = format!(
+        "- TODO task-id: {} Orphan task [[Phantomname]]\n- DONE task-id: {} Normal task\n",
+        TASK_ID_A, TASK_ID_B
+    );
+    write_logseq_page(&logseq_dir, "sprint-goal.md", PARENT_ID, &page_content);
+
+    let out = run_binary("logseq_sync", &dir, &["--graph", "logseq"]);
+    assert!(out.status.success(), "sync must complete even when owner reference is unresolvable");
+
+    let all = read_all_events(&dir);
+    // Task B should still get a marker update
+    let b_marker_updated = all.iter().any(|e|
+        e["source_module"].as_str() == Some("task_model")
+        && e["event_type"].as_str() == Some("TaskMarkerUpdated")
+        && e["payload"]["task_id"].as_str() == Some(TASK_ID_B));
+
+    assert!(b_marker_updated,
+        "TaskMarkerUpdated for Task B must be emitted even when Task A's owner is unresolvable");
+}
+
+// ── Multiple independent events per block line ────────────────────────────────
+
+#[test]
+fn test_sync_marker_and_dates_changed_emits_both_events() {
+    let dir = setup_dir();
+    let logseq_dir = dir.path().join("logseq");
+    fs::create_dir_all(logseq_dir.join("pages")).unwrap();
+
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+    seed_task_added_with_owner(&dir, TASK_ID_A, "task", "Review", PARENT_ID, "TODO",
+                               "TBD", None, None);
+
+    // Marker changed (TODO → DONE) AND dates added
+    let task_block = format!(
+        "- DONE task-id: {} Review\n  SCHEDULED: <2026-06-10 Wed>\n  DEADLINE: <2026-06-20 Sat>\n",
+        TASK_ID_A
+    );
+    write_logseq_page(&logseq_dir, "sprint-goal.md", PARENT_ID, &task_block);
+
+    run_binary("logseq_sync", &dir, &["--graph", "logseq"]);
+
+    let all = read_all_events(&dir);
+    let marker_updated = all.iter().any(|e|
+        e["source_module"].as_str() == Some("task_model")
+        && e["event_type"].as_str() == Some("TaskMarkerUpdated")
+        && e["payload"]["task_id"].as_str() == Some(TASK_ID_A));
+    let dates_updated = all.iter().any(|e|
+        e["source_module"].as_str() == Some("task_model")
+        && e["event_type"].as_str() == Some("TaskDatesUpdated")
+        && e["payload"]["task_id"].as_str() == Some(TASK_ID_A));
+
+    assert!(marker_updated, "TaskMarkerUpdated must be emitted when marker changes");
+    assert!(dates_updated,  "TaskDatesUpdated must be emitted when dates change");
+}
+
+#[test]
+fn test_sync_only_dates_changed_emits_only_dates_updated() {
+    let dir = setup_dir();
+    let logseq_dir = dir.path().join("logseq");
+    fs::create_dir_all(logseq_dir.join("pages")).unwrap();
+
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+    // Task starts with TODO marker and no dates
+    seed_task_added_with_owner(&dir, TASK_ID_A, "task", "Review", PARENT_ID, "TODO",
+                               "TBD", None, None);
+
+    // Marker UNCHANGED (still TODO); only dates added
+    let task_block = format!(
+        "- TODO task-id: {} Review\n  SCHEDULED: <2026-06-10 Wed>\n",
+        TASK_ID_A
+    );
+    write_logseq_page(&logseq_dir, "sprint-goal.md", PARENT_ID, &task_block);
+
+    run_binary("logseq_sync", &dir, &["--graph", "logseq"]);
+
+    let all = read_all_events(&dir);
+    let marker_updated = all.iter().any(|e|
+        e["source_module"].as_str() == Some("task_model")
+        && e["event_type"].as_str() == Some("TaskMarkerUpdated")
+        && e["payload"]["task_id"].as_str() == Some(TASK_ID_A));
+    let dates_updated = all.iter().any(|e|
+        e["source_module"].as_str() == Some("task_model")
+        && e["event_type"].as_str() == Some("TaskDatesUpdated")
+        && e["payload"]["task_id"].as_str() == Some(TASK_ID_A));
+
+    assert!(!marker_updated, "TaskMarkerUpdated must NOT be emitted when marker did not change");
+    assert!(dates_updated,   "TaskDatesUpdated must be emitted when scheduled_date changed");
+}
+
+// ── Discovery: TaskAdded via sync includes new fields ─────────────────────────
+
+#[test]
+fn test_sync_discovery_task_added_includes_owner_id() {
+    let dir = setup_dir();
+    let logseq_dir = dir.path().join("logseq");
+    fs::create_dir_all(logseq_dir.join("pages")).unwrap();
+
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+    seed_parent_item(&dir, STAKEHOLDER_ID, "milestone", "Maria");
+
+    let discovered_id = "11111111-2222-3333-4444-555555555555";
+    // New task (not in project record), with [[Maria]] owner
+    write_logseq_page(&logseq_dir, "sprint-goal.md", PARENT_ID,
+        &format!("- TODO task-id: {} Discovered task [[Maria]]\n", discovered_id));
+    write_logseq_page(&logseq_dir, "Maria.md", STAKEHOLDER_ID, "");
+
+    run_binary("logseq_sync", &dir, &["--graph", "logseq"]);
+
+    let all = read_all_events(&dir);
+    let discovery = all.iter()
+        .find(|e| e["source_module"].as_str() == Some("task_model")
+               && e["event_type"].as_str() == Some("TaskAdded")
+               && e["payload"]["task_id"].as_str() == Some(discovered_id))
+        .expect("TaskAdded must be emitted for discovered task");
+
+    let p = &discovery["payload"];
+    // Owner resolves from [[Maria]] — stakeholder page has item_id = STAKEHOLDER_ID
+    assert_eq!(p["owner_id"].as_str().unwrap(), STAKEHOLDER_ID,
+        "Discovered task owner_id must resolve from [[Maria]] page reference");
+    assert!(p.get("scheduled_date").is_some(), "Discovered TaskAdded must include scheduled_date field");
+    assert!(p.get("deadline").is_some(),       "Discovered TaskAdded must include deadline field");
+}
+
+#[test]
+fn test_sync_discovery_without_owner_assigns_tbd() {
+    let dir = setup_dir();
+    let logseq_dir = dir.path().join("logseq");
+    fs::create_dir_all(logseq_dir.join("pages")).unwrap();
+
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+
+    let discovered_id = "22222222-3333-4444-5555-666666666666";
+    // Task line with no [[owner]] reference
+    write_logseq_page(&logseq_dir, "sprint-goal.md", PARENT_ID,
+        &format!("- TODO task-id: {} Anonymous task\n", discovered_id));
+
+    run_binary("logseq_sync", &dir, &["--graph", "logseq"]);
+
+    let all = read_all_events(&dir);
+    let discovery = all.iter()
+        .find(|e| e["source_module"].as_str() == Some("task_model")
+               && e["event_type"].as_str() == Some("TaskAdded")
+               && e["payload"]["task_id"].as_str() == Some(discovered_id))
+        .expect("TaskAdded must be emitted for discovered task");
+
+    assert_eq!(discovery["payload"]["owner_id"].as_str().unwrap(), "TBD",
+        "Discovered task without [[owner]] must have owner_id = TBD");
+}
+
+#[test]
+fn test_sync_discovery_with_dates_includes_dates_in_task_added() {
+    let dir = setup_dir();
+    let logseq_dir = dir.path().join("logseq");
+    fs::create_dir_all(logseq_dir.join("pages")).unwrap();
+
+    seed_parent_item(&dir, PARENT_ID, "milestone", "Sprint goal");
+
+    let discovered_id = "33333333-4444-5555-6666-777777777777";
+    let task_block = format!(
+        "- TODO task-id: {} Dated discovery\n  SCHEDULED: <2026-06-20 Sat>\n  DEADLINE: <2026-06-25 Thu>\n",
+        discovered_id
+    );
+    write_logseq_page(&logseq_dir, "sprint-goal.md", PARENT_ID, &task_block);
+
+    run_binary("logseq_sync", &dir, &["--graph", "logseq"]);
+
+    let all = read_all_events(&dir);
+    let discovery = all.iter()
+        .find(|e| e["source_module"].as_str() == Some("task_model")
+               && e["event_type"].as_str() == Some("TaskAdded")
+               && e["payload"]["task_id"].as_str() == Some(discovered_id))
+        .expect("TaskAdded must be emitted for discovered task with dates");
+
+    assert_eq!(discovery["payload"]["scheduled_date"].as_str().unwrap(), "2026-06-20",
+        "Discovery TaskAdded must include scheduled_date from SCHEDULED: line");
+    assert_eq!(discovery["payload"]["deadline"].as_str().unwrap(), "2026-06-25",
+        "Discovery TaskAdded must include deadline from DEADLINE: line");
 }

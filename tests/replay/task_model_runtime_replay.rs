@@ -23,15 +23,19 @@ const VALID_EVENT_TYPES: &[&str] = &[
     "TaskAddRequested",
     "TaskAdded",
     "TaskMarkerUpdated",
+    "TaskOwnerUpdated",
+    "TaskDatesUpdated",
     "TaskAddFailedParentNotFound",
+    "TaskAddFailedOwnerNotFound",
     "TaskAddFailedSchemaInvalid",
     "TaskAddFailedTaskTypeNotDefined",
 ];
 
 const OBSERVATIONAL: &[&str] = &["TaskAddRequested"];
-const BEHAVIORAL: &[&str]    = &["TaskAdded", "TaskMarkerUpdated"];
+const BEHAVIORAL: &[&str]    = &["TaskAdded", "TaskMarkerUpdated", "TaskOwnerUpdated", "TaskDatesUpdated"];
 const FAILURE: &[&str]       = &[
     "TaskAddFailedParentNotFound",
+    "TaskAddFailedOwnerNotFound",
     "TaskAddFailedSchemaInvalid",
     "TaskAddFailedTaskTypeNotDefined",
 ];
@@ -103,9 +107,12 @@ fn test_runtime_task_add_requested_payload_shape() {
 
     for event in &requests {
         let p = &event["payload"];
-        assert!(p["description"].as_str().is_some(),    "description must be a string");
-        assert!(p["parent_item_id"].as_str().is_some(), "parent_item_id must be a string");
-        assert!(p.get("requested_marker").is_some(),    "requested_marker must be present (may be null)");
+        assert!(p["description"].as_str().is_some(),         "description must be a string");
+        assert!(p["parent_item_id"].as_str().is_some(),      "parent_item_id must be a string");
+        assert!(p.get("requested_marker").is_some(),         "requested_marker must be present (may be null)");
+        assert!(p.get("requested_owner_id").is_some(),       "requested_owner_id must be present (may be null)");
+        assert!(p.get("requested_scheduled_date").is_some(), "requested_scheduled_date must be present (may be null)");
+        assert!(p.get("requested_deadline").is_some(),       "requested_deadline must be present (may be null)");
     }
 }
 
@@ -128,6 +135,9 @@ fn test_runtime_task_added_payload_shape() {
         assert!(p["parent_item_id"].as_str().is_some(),  "parent_item_id must be a string");
         let marker = p["initial_marker"].as_str().expect("initial_marker must be a string");
         assert!(!marker.is_empty(), "initial_marker must not be empty");
+        assert!(p["owner_id"].as_str().is_some(), "owner_id must be a string (never null)");
+        assert!(p.get("scheduled_date").is_some(), "scheduled_date must be present (may be null)");
+        assert!(p.get("deadline").is_some(),       "deadline must be present (may be null)");
     }
 }
 

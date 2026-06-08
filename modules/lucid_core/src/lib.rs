@@ -90,6 +90,9 @@ pub struct RecordedItem {
     pub session_id:         String,
     pub parent_item_id:     Option<String>,
     pub current_marker:     Option<String>,
+    pub owner_id:           Option<String>,
+    pub scheduled_date:     Option<String>,
+    pub deadline:           Option<String>,
 }
 
 // ── open_event_log unit tests ─────────────────────────────────────────────────

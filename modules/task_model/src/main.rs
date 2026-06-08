@@ -7,6 +7,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 const SOURCE_MODULE: &str = "task_model";
+const TBD_OWNER_ID: &str = "TBD";
 
 #[derive(Parser)]
 #[command(about = "LucidPM task instance manager")]
@@ -29,6 +30,15 @@ enum Commands {
         /// first marker defined in the vocabulary
         #[arg(long)]
         marker: Option<String>,
+        /// Owner stakeholder item ID; omit to assign to the TBD placeholder
+        #[arg(long)]
+        owner: Option<String>,
+        /// Scheduled start date (ISO format: YYYY-MM-DD)
+        #[arg(long)]
+        scheduled: Option<String>,
+        /// Deadline date (ISO format: YYYY-MM-DD)
+        #[arg(long)]
+        deadline: Option<String>,
     },
 }
 
@@ -96,15 +106,25 @@ fn all_record_item_ids() -> Result<Vec<String>> {
     Ok(ids)
 }
 
-fn cmd_add(description: &str, parent_id: &str, requested_marker: Option<&str>) -> Result<()> {
+fn cmd_add(
+    description: &str,
+    parent_id: &str,
+    requested_marker: Option<&str>,
+    requested_owner_id: Option<&str>,
+    scheduled_date: Option<&str>,
+    deadline: Option<&str>,
+) -> Result<()> {
     let correlation_id = Uuid::new_v4().to_string();
     let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
     // Emit OBSERVATIONAL event before any validation (contract: TaskAddRequested always first)
     emitter.emit("TaskAddRequested", &correlation_id, json!({
-        "description":     description,
-        "parent_item_id":  parent_id,
-        "requested_marker": requested_marker,
+        "description":              description,
+        "parent_item_id":           parent_id,
+        "requested_marker":         requested_marker,
+        "requested_owner_id":       requested_owner_id,
+        "requested_scheduled_date": scheduled_date,
+        "requested_deadline":       deadline,
     }));
 
     // Load and validate schema — project_schema emits cross-module events on failure.
@@ -139,7 +159,6 @@ fn cmd_add(description: &str, parent_id: &str, requested_marker: Option<&str>) -
         if markers.contains_key(req) {
             req.to_string()
         } else {
-            // Fall back to first marker alphabetically
             let mut sorted_markers: Vec<&str> = markers.keys().map(|s| s.as_str()).collect();
             sorted_markers.sort();
             sorted_markers.first().copied().unwrap_or("TODO").to_string()
@@ -161,15 +180,34 @@ fn cmd_add(description: &str, parent_id: &str, requested_marker: Option<&str>) -
         return Ok(());
     }
 
+    // Failure Path 5: OwnerNotFound — specified owner must exist in the project record.
+    // TBD sentinel is accepted unconditionally; it requires no lookup.
+    let owner_id = if let Some(owner) = requested_owner_id {
+        if owner != TBD_OWNER_ID && !known_ids.contains(&owner.to_string()) {
+            eprintln!("error: owner item '{}' not found in project record", owner);
+            emitter.emit("TaskAddFailedOwnerNotFound", &correlation_id, json!({
+                "failure_reason": "owner_not_found",
+                "owner_id":       owner,
+            }));
+            return Ok(());
+        }
+        owner.to_string()
+    } else {
+        TBD_OWNER_ID.to_string()
+    };
+
     // All preconditions satisfied — create the task instance.
     let task_id = Uuid::new_v4().to_string();
 
     emitter.emit("TaskAdded", &correlation_id, json!({
-        "task_id":         task_id,
-        "item_type":       canonical_type,
-        "description":     description,
-        "parent_item_id":  parent_id,
-        "initial_marker":  initial_marker,
+        "task_id":        task_id,
+        "item_type":      canonical_type,
+        "description":    description,
+        "parent_item_id": parent_id,
+        "initial_marker": initial_marker,
+        "owner_id":       owner_id,
+        "scheduled_date": scheduled_date,
+        "deadline":       deadline,
     }));
 
     println!(
@@ -185,8 +223,15 @@ fn cmd_add(description: &str, parent_id: &str, requested_marker: Option<&str>) -
 fn main() {
     let cli = Cli::parse();
     let result = match &cli.command {
-        Commands::Add { description, parent, marker } => {
-            cmd_add(description, parent, marker.as_deref())
+        Commands::Add { description, parent, marker, owner, scheduled, deadline } => {
+            cmd_add(
+                description,
+                parent,
+                marker.as_deref(),
+                owner.as_deref(),
+                scheduled.as_deref(),
+                deadline.as_deref(),
+            )
         }
     };
     if let Err(e) = result {

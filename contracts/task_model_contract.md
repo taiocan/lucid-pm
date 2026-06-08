@@ -9,7 +9,8 @@ DERIVED FROM: intents/task_model.md
 **Task instance** — a project record item whose entity type resolves to
 the canonical task block type concept in the active vocabulary. A task
 instance has a unique identifier, a description, exactly one parent
-item association, and a current marker.
+item association, a current marker, exactly one owner, and optional
+scheduling dates.
 
 **Canonical task block type concept** — the entity type concept in the
 active vocabulary under which task markers are defined. Its
@@ -30,6 +31,25 @@ instance's current state (e.g., `TODO`, `DONE`, `DOING`). Initialized
 at creation; updated when a changed vocabulary-mapped marker is
 observed during sync.
 
+**Owner** — the stakeholder item associated with a task via the
+assignedTo link concept. Every task instance has exactly one owner.
+The owner is set at creation time and is queryable for the lifetime
+of the task instance. The TBD placeholder is a valid owner.
+
+**TBD placeholder** — a designated stakeholder entity present in any
+project that uses task_model. It serves as the default owner when no
+named stakeholder is specified at task creation. The TBD placeholder
+satisfies all ownership invariants; OwnerNotFound cannot be raised
+when the TBD placeholder is the intended owner.
+
+**Scheduled date** — an optional date associated with a task
+representing when work on the task is expected to begin. Its absence
+has no effect on task validity or query eligibility.
+
+**Deadline** — an optional date associated with a task representing
+the latest acceptable completion date. Its absence has no effect on
+task validity or query eligibility.
+
 **Stable task identifier** — an identifier associated with a task
 instance that allows sync operations to correlate a task block line in
 a Logseq page to the same logical task instance across export and sync
@@ -37,11 +57,14 @@ runs. The stable identifier is embedded in the task block line at
 export time and read back during sync. Its concrete representation is
 an implementation choice.
 
-**Task block line** — a line in a Logseq item page representing a task
-instance, nested within the parent item's page rather than rendered as
-a separate page. A task block line carries the task's current marker,
-its stable identifier, and its description. The exact serialization
-format is an implementation choice.
+**Task block line** — a line (or structured block) in a Logseq item
+page representing a task instance, nested within the parent item's
+page rather than rendered as a separate page. A task block line
+carries the task's current marker, its stable identifier, its
+description, a reference to its owner, and optionally its scheduled
+date and deadline when set. The exact serialization format is
+specified in the logseq_export refinement (R_export_format) and is
+an implementation choice in this contract.
 
 **Discovered task** — a task instance registered in the project record
 from a task block line found in a Logseq page during sync, where the
@@ -101,7 +124,9 @@ Given the project record contains parent item P and task instance T
 When the PM triggers an export
 Then P's Logseq page contains T rendered as a task block line
 And the task block line carries T's current marker, T's stable
-  identifier, and T's description
+  identifier, T's description, and a reference to T's owner
+And when T has a scheduled date or deadline, these are also present
+  in the task block line
 And NO separate Logseq page is created for T
 And all non-task items are exported as standalone Logseq pages per
   existing behavior
@@ -152,6 +177,66 @@ Then the link is recorded and queryable in the project record
 And downstream queries over item links include this link
 ```
 
+### Happy Path 8: Task created with named owner
+
+```gherkin
+Given the active vocabulary is loaded successfully
+And stakeholder item S exists in the project record
+And parent item P exists in the project record
+When the PM creates a task with description D, parent P, and owner S
+Then the task instance is created in the project record
+And the task instance's owner is S
+And S's ownership of the task is queryable in the project record
+```
+
+### Happy Path 9: Task created without owner — TBD placeholder assigned
+
+```gherkin
+Given the active vocabulary is loaded successfully
+And parent item P exists in the project record
+When the PM creates a task with description D and parent P,
+  specifying no owner
+Then the task instance is created in the project record
+And the task instance's owner is the TBD placeholder
+And no failure signal is produced
+```
+
+### Happy Path 10: Task created with scheduled date and deadline
+
+```gherkin
+Given the active vocabulary is loaded successfully
+And parent item P exists
+When the PM creates a task with scheduled date D1 and deadline D2
+Then the task instance is created in the project record
+And the task's scheduled date is D1 and deadline is D2
+And the task appears normally in all project queries and views
+```
+
+### Happy Path 11: Ownership change synced from Logseq
+
+```gherkin
+Given task instance T exists in the project record with owner S1
+And the parent item's Logseq page shows T's task block line
+  referencing owner S2 (S2 ≠ S1)
+And stakeholder item S2 exists in the project record
+When the PM triggers a sync
+Then T's owner in the project record becomes S2
+And no new task instance is created
+And all other sync operations complete as before
+```
+
+### Happy Path 12: Date changes synced from Logseq
+
+```gherkin
+Given task instance T exists with scheduled date D1 and deadline D2
+And T's task block line in Logseq now shows scheduled date D1'
+  and deadline D2' (one or both differ)
+When the PM triggers a sync
+Then T's scheduled date and deadline in the project record reflect
+  the values from the Logseq block line
+And no new task instance is created
+```
+
 ### Boundary Scenario 1: No project schema — behavior unchanged when no tasks present
 
 ```gherkin
@@ -197,7 +282,37 @@ Then P's Logseq page contains no task block lines
 And P's page content is identical to what it would be without task_model
 ```
 
-### Falsification Scenario: Alias-stored task type included in project queries
+### Boundary Scenario 5: Task without dates is valid in all operations
+
+```gherkin
+Given task instance T exists with no scheduled date and no deadline set
+When the PM runs any project view, status query, or priority filter
+Then T appears in the output normally
+And no warning, error, or exclusion related to missing dates occurs
+```
+
+### Boundary Scenario 6: TBD-owned task participates in all queries
+
+```gherkin
+Given task instance T exists with the TBD placeholder as owner
+When the PM runs any project view, status query, or priority filter
+Then T appears in the output identically to tasks with named owners
+And no warning or error related to TBD ownership is signalled
+```
+
+### Boundary Scenario 7: Sync with unresolvable owner reference — owner unchanged
+
+```gherkin
+Given task instance T exists with owner S1
+And T's task block line in Logseq references an owner name that does
+  not resolve to any known stakeholder in the project record
+When the PM triggers a sync
+Then T's owner remains S1
+And the sync completes; other task and item updates proceed normally
+And no failure signal is raised for T
+```
+
+### Falsification Scenario 1: Alias-stored task type included in project queries
 
 ```gherkin
 Given the vocabulary defines canonical task block type "Task" with alias
@@ -210,6 +325,17 @@ Then both T1 and T2 appear in the output
 Falsifies: query eligibility is determined by direct string comparison
            against the canonical type name "Task" — T2 stored as "task"
            would be excluded rather than resolved to the same concept.
+```
+
+### Falsification Scenario 2: Owner stored with task is queryable directly
+
+```gherkin
+Given task instance T was created with named owner S
+When the PM queries T's associations in the project record
+Then T's owner is S
+Falsifies: owner is stored only as a separate link record not loaded
+           during task queries — T's ownership is invisible unless
+           item_links is explicitly queried.
 ```
 
 ### Failure Path 1: ParentNotFound
@@ -259,6 +385,16 @@ And T's current marker remains M
 And sync completes for all other tasks and items
 ```
 
+### Failure Path 5: OwnerNotFound
+
+```gherkin
+Given no stakeholder item with ID S exists in the project record
+When the PM runs task add specifying owner S
+Then a failure result is returned indicating the owner was not found
+And no task instance is created
+And the project record is unchanged
+```
+
 ---
 
 ## Invariants
@@ -287,6 +423,12 @@ And sync completes for all other tasks and items
 - Every task instance is associated with exactly one parent item; this
   association is preserved and queryable for the lifetime of the task
   instance
+- **Ownership invariant:** every task instance in the project record is
+  associated with exactly one owner — either a named stakeholder or the
+  TBD placeholder; no task instance is ever owner-less
+- **Scheduling optionality invariant:** the absence of a scheduled date
+  or deadline on a task instance has no effect on that task's validity,
+  query eligibility, status evaluation, or export behavior
 - Task instances are rendered in Logseq as task block lines nested under
   their parent item's page — no task instance produces a standalone
   Logseq page in any export operation
@@ -298,24 +440,25 @@ And sync completes for all other tasks and items
 
 ## Vocabulary Dependency
 
-**Vocabulary owner:** project_schema module  
+**Vocabulary owner:** project_schema module
 **Concepts operated on:** canonical task block type concept (for task
 entity type identity, query inclusion, and type display); block type
 marker-to-status mapping (maps current marker to domain status concept);
-vocabulary-defined valid status values per entity type concept (consulted
-when explicit status operations are performed on a task instance via
-item_status)  
+the assignedTo link concept (defines the owner relationship between a
+task and a stakeholder); vocabulary-defined valid status values per
+entity type concept (consulted when explicit status operations are
+performed on a task instance via item_status)
 **Concept Dependency Invariant (governing):** Task identity resolution,
 marker-derived status outcomes, and eligibility for project queries are
 invariant under substitution of equivalent vocabulary representations. A
 task stored with the canonical task type representation and a task stored
 with an alias of that type must produce identical outcomes in all
-operations.  
+operations.
 **Representation Ban invariant (derived):** Stored type representations
 — canonical names, aliases, casing variations — must not appear as
 inputs to domain decision logic for task identity resolution, status
 derivation, or query eligibility. Operations receive the resolved
-concept, not the stored string.  
+concept, not the stored string.
 **Display invariant:** When a task instance's entity type is displayed
 in any output, the canonical representation associated with the resolved
 concept is used, regardless of the stored representation.
@@ -326,16 +469,19 @@ concept is used, regardless of the stored representation.
 
 | Invariant | Falsifying fixture | Observable when correct | Wrong implementation assumption | Test ID |
 |---|---|---|---|---|
-| Task is first-class in queries with generic scope | 1 task instance, 1 non-task item in project record; run project_state view (generic scope) | Both items appear in the output | View skips items whose type is not found in pageTypes; block types excluded | `test_task_first_class_falsifies_page_types_only_check` |
-| No raw marker in domain comparisons | Vocabulary: marker "DONE"→"done"; task has marker "DONE"; filter by status "done" | Task appears in filter results | Marker string "DONE" compared directly against status filter "done" → string mismatch; task excluded | `test_no_raw_marker_in_comparisons_falsifies_direct_string_match` |
-| Direct command ≡ Logseq-discovered | Create T1 via task add; create T2 via sync discovery; run project_state view and status get on both | T1 and T2 appear with identical structure; no field distinguishes creation origin | task add stores a creation_source field absent from synced tasks; queries expose the difference | `test_direct_and_discovered_tasks_indistinguishable_falsifies_origin_field` |
-| One instance per logical task | Task T in project record; run sync 3 times, task block line unchanged | Exactly 1 task instance T after all 3 runs | Sync creates a new task instance on each run that encounters a task block | `test_one_instance_per_task_falsifies_duplicate_on_each_sync` |
-| Parent association preserved | Create task T with parent P; run project_state view | T's record includes parent item ID P | Parent association not stored in the creation event; queries cannot return it | `test_parent_association_preserved_falsifies_missing_parent_field` |
-| No standalone page for task | Parent P and task T with parent P; run export | No page slug for T exists in pages/; T's block line appears in P's page only | Export treats all items uniformly and creates pages/ entries for all item types | `test_no_standalone_page_falsifies_uniform_page_creation` |
-| Absent tasks leave existing behavior unchanged | Project record with 0 task instances; run project_state view | Output identical to pre-task_model for the same record | task_model changes the item-loading path unconditionally; empty task list alters output | `test_absent_tasks_leave_behavior_unchanged_falsifies_unconditional_code_path` |
-| Concept Dependency — alias equals canonical for type resolution | Vocabulary: canonical "Task", alias "task"; T1 stored as "Task", T2 stored as "task"; run project_state view | Both T1 and T2 in output | String comparison against "Task"; "task"-stored item excluded | `test_alias_type_resolves_same_as_canonical_falsifies_string_match` |
-| Concept Dependency — marker mapping uses concept not representation | Vocabulary: canonical "Task", alias "task"; both items have marker "TODO"→"todo"; run status filter on "todo" | Both items appear regardless of stored type representation | Status filter compares stored type representation against canonical before resolving; alias-stored item missed | `test_marker_mapping_uses_concept_not_raw_marker_falsifies_no_mapping` |
-| Identity invariant — different stable identifiers = distinct tasks | Two task block lines under same parent P, identical description "Review", different stable identifiers; run sync | Two distinct task instances exist in project record | Implementation uses description+parent as identity key rather than stable identifier; two tasks with same description collapse into one | `test_identity_invariant_different_ids_are_distinct_tasks_falsifies_desc_parent_identity` |
+| Task is first-class in queries with generic scope | 1 task instance, 1 non-task item in project record; run project_state view (generic scope) | Both items appear in the output | View skips items whose type is not found in pageTypes; block types excluded | |
+| No raw marker in domain comparisons | Vocabulary: marker "DONE"→"done"; task has marker "DONE"; filter by status "done" | Task appears in filter results | Marker string "DONE" compared directly against status filter "done" → string mismatch; task excluded | |
+| Direct command ≡ Logseq-discovered | Create T1 via task add; create T2 via sync discovery; run project_state view and status get on both | T1 and T2 appear with identical structure; no field distinguishes creation origin | task add stores a creation_source field absent from synced tasks; queries expose the difference | |
+| One instance per logical task | Task T in project record; run sync 3 times, task block line unchanged | Exactly 1 task instance T after all 3 runs | Sync creates a new task instance on each run that encounters a task block | |
+| Parent association preserved | Create task T with parent P; run project_state view | T's record includes parent item ID P | Parent association not stored in the creation event; queries cannot return it | |
+| No standalone page for task | Parent P and task T with parent P; run export | No page slug for T exists in pages/; T's block line appears in P's page only | Export treats all items uniformly and creates pages/ entries for all item types | |
+| Absent tasks leave existing behavior unchanged | Project record with 0 task instances; run project_state view | Output identical to pre-task_model for the same record | task_model changes the item-loading path unconditionally; empty task list alters output | |
+| Concept Dependency — alias equals canonical for type resolution | Vocabulary: canonical "Task", alias "task"; T1 stored as "Task", T2 stored as "task"; run project_state view | Both T1 and T2 in output | String comparison against "Task"; "task"-stored item excluded | |
+| Concept Dependency — marker mapping uses concept not representation | Vocabulary: canonical "Task", alias "task"; both items have marker "TODO"→"todo"; run status filter on "todo" | Both items appear regardless of stored type representation | Status filter compares stored type representation against canonical before resolving; alias-stored item missed | |
+| Identity invariant — different stable identifiers = distinct tasks | Two task block lines under same parent P, identical description "Review", different stable identifiers; run sync | Two distinct task instances exist in project record | Implementation uses description+parent as identity key rather than stable identifier; two tasks with same description collapse into one | |
+| Ownership invariant — task created without owner gets TBD | Create task with no --owner flag; query task's owner | Owner is TBD placeholder, not null/absent | Implementation leaves owner field null when --owner is omitted; OwnerNotFound raised or owner field absent | |
+| Ownership invariant — owner is queryable on the task directly | Create task T with owner S; query T's associations | T's owner is S | Owner stored only as a separate link record not loaded in task queries; ownership invisible without item_links query | |
+| Scheduling optionality — tasks without dates valid in all views | Task T with no scheduled date or deadline; run priority view | T appears normally with no date-related exclusion or warning | Priority view or export treats null dates as invalid and skips the task | |
 
 ---
 
@@ -343,7 +489,9 @@ concept is used, regardless of the stored representation.
 
 - For task add: the project record is accessible; the active vocabulary
   is loaded successfully and defines a canonical task block type concept;
-  the specified parent item exists in the project record
+  the specified parent item exists in the project record; if an owner is
+  specified, the owner item exists in the project record (OwnerNotFound
+  otherwise); if no owner is specified, the TBD placeholder is available
 - For export with tasks: all preconditions from the logseq_export
   contract apply; task instances have parent items present in the
   project record at export time
@@ -354,15 +502,23 @@ concept is used, regardless of the stored representation.
 
 - After successful task add: a task instance exists in the project
   record associated with the specified parent item, carrying the
-  specified initial marker; the creation is recorded in the event log
+  specified initial marker; the task's owner is the specified stakeholder
+  or the TBD placeholder if none was specified; scheduled date and
+  deadline are stored if provided; the creation is recorded in the
+  event log
 - After export with tasks: each task instance appears as a task block
-  line nested in its parent item's Logseq page; no task instance has a
+  line nested in its parent item's Logseq page, carrying the task's
+  owner reference and any stored dates; no task instance has a
   standalone page; all other items are exported per existing behavior
 - After sync with task changes: each recognized task block with a
-  changed vocabulary-mapped marker has its effective status updated and
-  current marker updated; newly discovered tasks are registered in the
-  project record; no duplicate instances are created
+  changed vocabulary-mapped marker has its effective status updated;
+  each recognized task block with a changed owner reference (resolving
+  to a known stakeholder) has its owner updated; each recognized task
+  block with changed date lines has its dates updated; newly discovered
+  tasks are registered in the project record with the TBD placeholder
+  as their initial owner; no duplicate instances are created
 - On ParentNotFound: no task instance created; project record unchanged
+- On OwnerNotFound: no task instance created; project record unchanged
 - On SchemaInvalid: no task instance created; project record unchanged
 - On TaskTypeNotDefined: no task instance created; project record
   unchanged
@@ -386,10 +542,10 @@ embedded default vocabulary is always present. Only parse, validation,
 and alias-collision failures from a present-but-invalid project schema
 file are relevant here.
 
-Note: task add also requires that the project record contains the
-specified parent item. This is a dependency on project record state
-(not a specific event signal): the operation reads whatever items are
-currently recorded and fails if the parent is absent.
+Note: task add requires that the specified parent item exists in the
+project record and that the specified owner (if named) exists as a
+stakeholder item in the project record. These are dependencies on
+project record state, not specific event signals.
 
 ---
 
@@ -399,32 +555,46 @@ currently recorded and fails if the parent is absent.
 
 Task instances in the project record are rendered as task block lines
 nested under their parent item's Logseq page, not as standalone Logseq
-pages. Each task block line carries the task's current marker, the
-task's stable identifier, and the task's description. No other change
-to logseq_export behavior.
+pages. Each task block line carries the task's current marker, its
+stable identifier, its description, a reference to its owner, and
+optionally its scheduled date and deadline when set.
+
+The exact serialization format (marker position, owner reference
+syntax, date line format) is specified in the R_export_format
+refinement of logseq_export and is an implementation choice in this
+contract.
+
+No other change to logseq_export behavior. All existing logseq_export
+events and their schemas are unchanged.
 
 Clarification to existing invariant: "Every item in the project record
 appears in the exported output on a successful export" — for task
 instances, appearing in the output means appearing as a task block line
 nested in the parent item's page, not as a standalone page.
 
-All existing logseq_export events and their schemas are unchanged.
-
 ### logseq_sync — behavioral amendment
 
 In addition to reading page-level status and priority properties, the
-sync operation also scans task block lines nested in item pages.
+sync operation scans task block lines nested in item pages.
 
 For each task block line whose stable identifier resolves to a known
-project record task instance: if the block line's marker differs from
-the task's current stored marker and the new marker is present in the
-vocabulary's block type marker mapping, the task's effective status and
-current marker are updated.
+project record task instance:
+- If the marker differs from the stored current marker and the new
+  marker is vocabulary-mapped: the task's marker and effective status
+  are updated.
+- If the owner reference changes and the referenced name resolves to a
+  known stakeholder item: the task's owner is updated.
+- If the owner reference changes but the referenced name does not
+  resolve to any known stakeholder: the owner is unchanged; sync
+  continues for other items.
+- If the scheduled date or deadline changes: the task's dates are
+  updated.
 
 For each task block line whose stable identifier does not resolve to
 any existing project record item and whose marker is
 vocabulary-recognized: the task is registered as a new task instance
-(discovered task) with the owning page's item as parent.
+(discovered task) with the owning page's item as parent and the TBD
+placeholder as initial owner.
 
 Task block lines carrying no resolvable stable identifier are silently
 skipped.
@@ -438,7 +608,8 @@ All existing logseq_sync events and their schemas are unchanged.
 | Failure Name | Trigger Condition | Observable Signal |
 |---|---|---|
 | ParentNotFound | Parent item ID specified in task add does not exist in the project record | Failure result returned; no task created; project record unchanged |
-| SchemaInvalid | A project schema file is present but fails to parse, fails structural validation, or contains an alias collision | Schema error signals (SchemaParseError, SchemaValidationFailed, or SchemaAliasCollisionDetected) from project_schema module; task_model business-outcome failure signal; no task created; project record unchanged |
+| OwnerNotFound | Owner item ID specified in task add does not exist in the project record | Failure result returned; no task created; project record unchanged |
+| SchemaInvalid | A project schema file is present but fails to parse, fails structural validation, or contains an alias collision | Schema error signals from project_schema module; task_model business-outcome failure signal; no task created; project record unchanged |
 | TaskTypeNotDefined | Active vocabulary loaded successfully but defines no canonical task block type concept | Failure result returned indicating no task type is defined; no task created; project record unchanged |
 | TaskMarkerSyncSkipped | A task block line's marker is not present in the vocabulary's block type marker mapping during sync | Task's effective status and current marker are unchanged; sync completes for remaining tasks and items |
 
@@ -447,6 +618,6 @@ All existing logseq_sync events and their schemas are unchanged.
 status: APPROVED
 feature_id: task_model
 approved_by: human
-approved_at: 2026-06-04
+approved_at: 2026-06-07
 derived_from_intent: intents/task_model.md
 derived_event_schema: events/task_model_schema.md
