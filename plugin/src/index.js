@@ -54,7 +54,9 @@ function isLucidAvailable() {
   const wslMode = !!logseq.settings?.wsl_mode;
   try {
     const { execSync } = require('child_process');
-    const check = wslMode ? 'wsl lucid version' : 'lucid version';
+    // Use a login shell in WSL mode so ~/.profile and ~/.bash_profile are
+    // sourced and lucid is on PATH even if installed via cargo or a custom dir.
+    const check = wslMode ? 'wsl bash -l -c "lucid version"' : 'lucid version';
     execSync(check, { stdio: 'ignore' });
     return true;
   } catch (_) {
@@ -95,7 +97,8 @@ async function invokeCommand(subcommand) {
     const fullCmd  = ['lucid', ...COMMAND_ARGS[subcommand]].join(' ');
     // Escape single quotes in the path so the shell -c string stays valid.
     const safePath = projectPath.replace(/'/g, "'\\''");
-    cmd         = `wsl sh -c "cd '${safePath}' && ${fullCmd}"`;
+    // Login shell (-l) ensures ~/.profile is sourced so lucid is on PATH.
+    cmd         = `wsl bash -l -c "cd '${safePath}' && ${fullCmd}"`;
     execOptions = {};
   } else {
     cmd         = ['lucid', ...COMMAND_ARGS[subcommand]].join(' ');

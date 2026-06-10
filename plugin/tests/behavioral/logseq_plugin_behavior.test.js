@@ -251,7 +251,7 @@ test('invariant: success indication content distinguishes completion from error'
 
 // ── WSL Mode ─────────────────────────────────────────────────────────────────
 
-test('WSL mode: sync runs via wsl sh -c with linux project path', async () => {
+test('WSL mode: sync runs via wsl bash -l -c with linux project path', async () => {
   global.logseq.settings = {
     wsl_mode: true,
     explicit_project_path: '/home/arc/projects/lucidpm',
@@ -261,14 +261,14 @@ test('WSL mode: sync runs via wsl sh -c with linux project path', async () => {
   await registeredCommands['LucidPM Sync']();
 
   const [cmd, opts] = exec.mock.calls[0];
-  expect(cmd).toMatch(/^wsl sh -c /);
+  expect(cmd).toMatch(/^wsl bash -l -c /);
   expect(cmd).toContain("cd '/home/arc/projects/lucidpm'");
   expect(cmd).toContain('lucid sync --graph logseq');
   // cwd is not passed — working directory is embedded in the shell command
   expect(opts).toEqual({});
 });
 
-test('WSL mode: export runs via wsl sh -c', async () => {
+test('WSL mode: export runs via wsl bash -l -c', async () => {
   global.logseq.settings = {
     wsl_mode: true,
     explicit_project_path: '/home/arc/projects/lucidpm',
@@ -278,11 +278,11 @@ test('WSL mode: export runs via wsl sh -c', async () => {
   await registeredCommands['LucidPM Export']();
 
   const [cmd] = exec.mock.calls[0];
-  expect(cmd).toMatch(/^wsl sh -c /);
+  expect(cmd).toMatch(/^wsl bash -l -c /);
   expect(cmd).toContain('lucid export --output-dir logseq/pages');
 });
 
-test('WSL mode: suggest runs via wsl sh -c', async () => {
+test('WSL mode: suggest runs via wsl bash -l -c', async () => {
   global.logseq.settings = {
     wsl_mode: true,
     explicit_project_path: '/home/arc/projects/lucidpm',
@@ -292,11 +292,11 @@ test('WSL mode: suggest runs via wsl sh -c', async () => {
   await registeredCommands['LucidPM Suggest']();
 
   const [cmd] = exec.mock.calls[0];
-  expect(cmd).toMatch(/^wsl sh -c /);
+  expect(cmd).toMatch(/^wsl bash -l -c /);
   expect(cmd).toContain('lucid suggest propose');
 });
 
-test('WSL mode: lucid availability checked via wsl', async () => {
+test('WSL mode: lucid availability checked via login shell', async () => {
   global.logseq.settings = {
     wsl_mode: true,
     explicit_project_path: '/home/arc/projects/lucidpm',
@@ -305,7 +305,7 @@ test('WSL mode: lucid availability checked via wsl', async () => {
 
   await registeredCommands['LucidPM Sync']();
 
-  expect(execSync).toHaveBeenCalledWith('wsl lucid version', expect.any(Object));
+  expect(execSync).toHaveBeenCalledWith('wsl bash -l -c "lucid version"', expect.any(Object));
 });
 
 test('WSL mode: LucidNotAvailable shown when wsl lucid version fails', async () => {
