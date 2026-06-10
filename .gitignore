@@ -1,6 +1,7 @@
 target/
 *.jsonl.bak
 bin/
+node_modules/
 
 # openlore analysis artifacts
 .openlore/
