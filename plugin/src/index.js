@@ -22,7 +22,17 @@ async function main() {
       title:       'LucidPM Project Path',
       description: 'Explicit path to the LucidPM project directory. When set, takes ' +
                    'precedence over graph path inference. Leave blank to infer from the ' +
-                   'current Logseq graph.',
+                   'current Logseq graph. In WSL mode, use the Linux path ' +
+                   '(e.g. /home/user/projects/myproject).',
+    },
+    {
+      key:         'wsl_mode',
+      type:        'boolean',
+      default:     false,
+      title:       'WSL Mode',
+      description: 'Run lucid via WSL. Enable this when Logseq runs on Windows but ' +
+                   'lucid is installed in WSL. Requires LucidPM Project Path to be ' +
+                   'set to the Linux path of the project.',
     },
   ]);
 
@@ -41,9 +51,11 @@ async function resolveProject() {
 }
 
 function isLucidAvailable() {
+  const wslMode = !!logseq.settings?.wsl_mode;
   try {
     const { execSync } = require('child_process');
-    execSync('lucid version', { stdio: 'ignore' });
+    const check = wslMode ? 'wsl lucid version' : 'lucid version';
+    execSync(check, { stdio: 'ignore' });
     return true;
   } catch (_) {
     return false;
@@ -52,6 +64,7 @@ function isLucidAvailable() {
 
 async function invokeCommand(subcommand) {
   const projectPath = await resolveProject();
+  const wslMode     = !!logseq.settings?.wsl_mode;
 
   if (!projectPath) {
     logseq.UI.showMsg(
@@ -64,9 +77,11 @@ async function invokeCommand(subcommand) {
   }
 
   if (!isLucidAvailable()) {
+    const hint = wslMode
+      ? 'Install lucid in your WSL environment before using this plugin.'
+      : 'Install lucid before using this plugin.';
     logseq.UI.showMsg(
-      'LucidPM — LucidNotAvailable: `lucid` was not found on the system PATH. ' +
-      'Install lucid before using this plugin.',
+      `LucidPM — LucidNotAvailable: \`lucid\` was not found. ${hint}`,
       'error',
       { timeout: 8000 },
     );
@@ -74,9 +89,20 @@ async function invokeCommand(subcommand) {
   }
 
   const { exec } = require('child_process');
-  const cmd = ['lucid', ...COMMAND_ARGS[subcommand]].join(' ');
+  let cmd, execOptions;
 
-  exec(cmd, { cwd: projectPath }, (error, stdout, stderr) => {
+  if (wslMode) {
+    const fullCmd  = ['lucid', ...COMMAND_ARGS[subcommand]].join(' ');
+    // Escape single quotes in the path so the shell -c string stays valid.
+    const safePath = projectPath.replace(/'/g, "'\\''");
+    cmd         = `wsl sh -c "cd '${safePath}' && ${fullCmd}"`;
+    execOptions = {};
+  } else {
+    cmd         = ['lucid', ...COMMAND_ARGS[subcommand]].join(' ');
+    execOptions = { cwd: projectPath };
+  }
+
+  exec(cmd, execOptions, (error, stdout, stderr) => {
     if (error) {
       const output = (stderr || stdout || error.message).trim();
       logseq.UI.showMsg(

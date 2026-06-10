@@ -123,9 +123,12 @@ test('HP6: explicit_project_path field is registered in settings schema', () => 
   );
 });
 
-test('HP6: explicit_project_path is the only settings field governed by this contract', () => {
-  expect(capturedSettingsSchema).toHaveLength(1);
-  expect(capturedSettingsSchema[0].key).toBe('explicit_project_path');
+test('HP6: wsl_mode field is registered in settings schema', () => {
+  expect(capturedSettingsSchema).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ key: 'wsl_mode', type: 'boolean', default: false }),
+    ]),
+  );
 });
 
 // ── Failure Paths ────────────────────────────────────────────────────────────
@@ -244,4 +247,86 @@ test('invariant: success indication content distinguishes completion from error'
   // The PM must be able to distinguish completion from execution error —
   // at minimum the message must include the command output.
   expect(message).toContain('SyncCompleted: 3 items updated');
+});
+
+// ── WSL Mode ─────────────────────────────────────────────────────────────────
+
+test('WSL mode: sync runs via wsl sh -c with linux project path', async () => {
+  global.logseq.settings = {
+    wsl_mode: true,
+    explicit_project_path: '/home/arc/projects/lucidpm',
+  };
+  exec.mockImplementation((_cmd, _opts, cb) => cb(null, 'done.', ''));
+
+  await registeredCommands['LucidPM Sync']();
+
+  const [cmd, opts] = exec.mock.calls[0];
+  expect(cmd).toMatch(/^wsl sh -c /);
+  expect(cmd).toContain("cd '/home/arc/projects/lucidpm'");
+  expect(cmd).toContain('lucid sync --graph logseq');
+  // cwd is not passed — working directory is embedded in the shell command
+  expect(opts).toEqual({});
+});
+
+test('WSL mode: export runs via wsl sh -c', async () => {
+  global.logseq.settings = {
+    wsl_mode: true,
+    explicit_project_path: '/home/arc/projects/lucidpm',
+  };
+  exec.mockImplementation((_cmd, _opts, cb) => cb(null, 'done.', ''));
+
+  await registeredCommands['LucidPM Export']();
+
+  const [cmd] = exec.mock.calls[0];
+  expect(cmd).toMatch(/^wsl sh -c /);
+  expect(cmd).toContain('lucid export --output-dir logseq/pages');
+});
+
+test('WSL mode: suggest runs via wsl sh -c', async () => {
+  global.logseq.settings = {
+    wsl_mode: true,
+    explicit_project_path: '/home/arc/projects/lucidpm',
+  };
+  exec.mockImplementation((_cmd, _opts, cb) => cb(null, 'done.', ''));
+
+  await registeredCommands['LucidPM Suggest']();
+
+  const [cmd] = exec.mock.calls[0];
+  expect(cmd).toMatch(/^wsl sh -c /);
+  expect(cmd).toContain('lucid suggest propose');
+});
+
+test('WSL mode: lucid availability checked via wsl', async () => {
+  global.logseq.settings = {
+    wsl_mode: true,
+    explicit_project_path: '/home/arc/projects/lucidpm',
+  };
+  exec.mockImplementation((_cmd, _opts, cb) => cb(null, '', ''));
+
+  await registeredCommands['LucidPM Sync']();
+
+  expect(execSync).toHaveBeenCalledWith('wsl lucid version', expect.any(Object));
+});
+
+test('WSL mode: LucidNotAvailable shown when wsl lucid version fails', async () => {
+  global.logseq.settings = {
+    wsl_mode: true,
+    explicit_project_path: '/home/arc/projects/lucidpm',
+  };
+  execSync.mockImplementation(() => { throw new Error('not found'); });
+
+  await registeredCommands['LucidPM Sync']();
+
+  expect(exec).not.toHaveBeenCalled();
+  expect(logseq.UI.showMsg).toHaveBeenCalledWith(
+    expect.stringContaining('LucidNotAvailable'),
+    'error',
+    expect.any(Object),
+  );
+});
+
+test('WSL mode off: lucid checked natively, not via wsl', async () => {
+  global.logseq.settings = { wsl_mode: false };
+  await registeredCommands['LucidPM Sync']();
+  expect(execSync).toHaveBeenCalledWith('lucid version', expect.any(Object));
 });
