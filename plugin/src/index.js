@@ -4,7 +4,8 @@
 
 /* global logseq */
 
-const { exec, execSync } = require('child_process');
+// child_process is required lazily inside functions to avoid blocking plugin
+// load and triggering Logseq's slow-startup timeout.
 
 const COMMAND_ARGS = {
   sync:    ['sync',    '--graph',      'logseq'],
@@ -41,6 +42,7 @@ async function resolveProject() {
 
 function isLucidAvailable() {
   try {
+    const { execSync } = require('child_process');
     execSync('lucid version', { stdio: 'ignore' });
     return true;
   } catch (_) {
@@ -71,6 +73,7 @@ async function invokeCommand(subcommand) {
     return;
   }
 
+  const { exec } = require('child_process');
   const cmd = ['lucid', ...COMMAND_ARGS[subcommand]].join(' ');
 
   exec(cmd, { cwd: projectPath }, (error, stdout, stderr) => {
