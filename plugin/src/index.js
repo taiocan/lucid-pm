@@ -1,12 +1,13 @@
 // LucidPM Logseq Plugin
-// Registers Sync, Export, and Suggest commands. All domain operations are
-// delegated entirely to the `lucid` CLI; this plugin is a trigger layer only.
+// Registers Sync, Export, and Suggest commands. Delegates each to the `lucid`
+// CLI via either direct child_process (unsandboxed Logseq) or the companion
+// server (sandboxed Logseq / WSL setups).
 
-/* global logseq */
+/* global logseq, fetch */
 
-// Logseq plugins run in a sandboxed iframe. Node.js modules are accessed via
-// window.require (Electron's renderer-side require), not the global require.
+const SERVER_PORT = 7523;
 
+// First element of each array is the lucid subcommand; remaining are its flags.
 const COMMAND_ARGS = {
   sync:    ['sync',    '--graph',      'logseq'],
   export:  ['export',  '--output-dir', 'logseq/pages'],
@@ -20,19 +21,10 @@ async function main() {
       type:        'string',
       default:     '',
       title:       'LucidPM Project Path',
-      description: 'Explicit path to the LucidPM project directory. When set, takes ' +
-                   'precedence over graph path inference. Leave blank to infer from the ' +
-                   'current Logseq graph. In WSL mode, use the Linux path ' +
-                   '(e.g. /home/user/projects/myproject).',
-    },
-    {
-      key:         'wsl_mode',
-      type:        'boolean',
-      default:     false,
-      title:       'WSL Mode',
-      description: 'Run lucid via WSL. Enable this when Logseq runs on Windows but ' +
-                   'lucid is installed in WSL. Requires LucidPM Project Path to be ' +
-                   'set to the Linux path of the project.',
+      description: 'Absolute path to the LucidPM project directory. Required when the ' +
+                   'Logseq graph is not the project directory (e.g. WSL setups — use the ' +
+                   'Linux path: /home/user/projects/myproject). Leave blank to infer from ' +
+                   'the current Logseq graph.',
     },
   ]);
 
@@ -43,38 +35,57 @@ async function main() {
 
 async function resolveProject() {
   const explicit = (logseq.settings?.explicit_project_path || '').trim();
-  if (explicit !== '') {
-    return explicit;
-  }
+  if (explicit !== '') return explicit;
   const graph = await logseq.App.getCurrentGraph();
   return graph?.path || null;
 }
 
 function getChildProcess() {
-  if (typeof require !== 'undefined') return require('child_process');
-  if (typeof window !== 'undefined' && typeof window.require !== 'undefined') {
-    return window.require('child_process');
+  try {
+    const cp = typeof require !== 'undefined'
+      ? require('child_process')
+      : (typeof window !== 'undefined' && typeof window.require !== 'undefined')
+        ? window.require('child_process')
+        : null;
+    return (cp && typeof cp.exec === 'function') ? cp : null;
+  } catch (_) {
+    return null;
   }
-  return null;
 }
 
-function isLucidAvailable() {
-  const wslMode = !!logseq.settings?.wsl_mode;
-  const cp = getChildProcess();
-  if (!cp) return { ok: false, detail: 'child_process not available in this Logseq version' };
+async function runDirect(subcommand, projectPath) {
+  const cp  = getChildProcess();
+  const cmd = ['lucid', ...COMMAND_ARGS[subcommand]].join(' ');
+  return new Promise((resolve) => {
+    cp.exec(cmd, { cwd: projectPath }, (error, stdout, stderr) => {
+      if (error) {
+        resolve({ ok: false, output: (stderr || stdout || error.message).trim() });
+      } else {
+        resolve({ ok: true, output: stdout.trim() || `${subcommand} completed.` });
+      }
+    });
+  });
+}
+
+async function runViaServer(subcommand, projectPath) {
+  let response;
   try {
-    const check = wslMode ? 'wsl bash -l -c "lucid version"' : 'lucid version';
-    cp.execSync(check, { stdio: 'pipe' });
-    return { ok: true };
-  } catch (err) {
-    const detail = (err.stderr ? String(err.stderr).trim() : '') || err.message || String(err);
-    return { ok: false, detail };
+    response = await fetch(`http://localhost:${SERVER_PORT}/run`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ project: projectPath, args: COMMAND_ARGS[subcommand] }),
+    });
+  } catch (_) {
+    throw new Error(
+      `Could not reach the LucidPM plugin server at localhost:${SERVER_PORT}. ` +
+      `Start it in WSL: python3 plugin/server/lucid_plugin_server.py`
+    );
   }
+  return response.json();
 }
 
 async function invokeCommand(subcommand) {
   const projectPath = await resolveProject();
-  const wslMode     = !!logseq.settings?.wsl_mode;
 
   if (!projectPath) {
     logseq.UI.showMsg(
@@ -86,61 +97,34 @@ async function invokeCommand(subcommand) {
     return;
   }
 
-  const lucidCheck = isLucidAvailable();
-  if (!lucidCheck.ok) {
-    const hint = wslMode
-      ? 'Install lucid in your WSL environment before using this plugin.'
-      : 'Install lucid before using this plugin.';
+  let result;
+  try {
+    const cp = getChildProcess();
+    result = cp
+      ? await runDirect(subcommand, projectPath)
+      : await runViaServer(subcommand, projectPath);
+  } catch (err) {
     logseq.UI.showMsg(
-      `LucidPM — LucidNotAvailable: \`lucid\` was not found. ${hint}\n(${lucidCheck.detail})`,
-      'error',
-      { timeout: 12000 },
-    );
-    return;
-  }
-
-  const cp = getChildProcess();
-  if (!cp) {
-    logseq.UI.showMsg(
-      'LucidPM — child_process not available in this Logseq version. ' +
-      'The plugin requires Node.js access (Logseq Desktop with nodeIntegration).',
+      `LucidPM — LucidNotAvailable: ${err.message}`,
       'error',
       { timeout: 10000 },
     );
     return;
   }
-  const { exec } = cp;
-  let cmd, execOptions;
 
-  if (wslMode) {
-    const fullCmd  = ['lucid', ...COMMAND_ARGS[subcommand]].join(' ');
-    // Escape single quotes in the path so the shell -c string stays valid.
-    const safePath = projectPath.replace(/'/g, "'\\''");
-    // Login shell (-l) ensures ~/.profile is sourced so lucid is on PATH.
-    cmd         = `wsl bash -l -c "cd '${safePath}' && ${fullCmd}"`;
-    execOptions = {};
+  if (result.ok) {
+    logseq.UI.showMsg(
+      `LucidPM — ${subcommand} completed:\n${result.output || `${subcommand} completed.`}`,
+      'success',
+      { timeout: 6000 },
+    );
   } else {
-    cmd         = ['lucid', ...COMMAND_ARGS[subcommand]].join(' ');
-    execOptions = { cwd: projectPath };
+    logseq.UI.showMsg(
+      `LucidPM — ${subcommand} failed:\n${result.output}`,
+      'error',
+      { timeout: 10000 },
+    );
   }
-
-  exec(cmd, execOptions, (error, stdout, stderr) => {
-    if (error) {
-      const output = (stderr || stdout || error.message).trim();
-      logseq.UI.showMsg(
-        `LucidPM — ${subcommand} failed:\n${output}`,
-        'error',
-        { timeout: 10000 },
-      );
-    } else {
-      const output = stdout.trim() || `${subcommand} completed.`;
-      logseq.UI.showMsg(
-        `LucidPM — ${subcommand} completed:\n${output}`,
-        'success',
-        { timeout: 6000 },
-      );
-    }
-  });
 }
 
 logseq.ready(main).catch(console.error);

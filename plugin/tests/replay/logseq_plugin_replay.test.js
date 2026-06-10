@@ -8,11 +8,10 @@
 'use strict';
 
 jest.mock('child_process', () => ({
-  exec:     jest.fn(),
-  execSync: jest.fn(),
+  exec: jest.fn(),
 }));
 
-const { exec, execSync } = require('child_process');
+const { exec } = require('child_process');
 
 const registeredCommands = {};
 
@@ -36,7 +35,6 @@ beforeEach(() => {
   jest.clearAllMocks();
   global.logseq.settings = {};
   logseq.App.getCurrentGraph.mockResolvedValue({ path: '/replay/project' });
-  execSync.mockReturnValue(Buffer.from(''));
   exec.mockImplementation((_cmd, _opts, cb) => cb(null, 'output', ''));
 });
 
@@ -48,7 +46,6 @@ test('logseq_plugin_event_sequence_is_deterministic: sync command dispatch', asy
 
   jest.clearAllMocks();
   logseq.App.getCurrentGraph.mockResolvedValue({ path: '/replay/project' });
-  execSync.mockReturnValue(Buffer.from(''));
   exec.mockImplementation((_cmd, _opts, cb) => cb(null, 'output', ''));
 
   await registeredCommands['LucidPM Sync']();
@@ -66,7 +63,6 @@ test('logseq_plugin_event_sequence_is_deterministic: export command dispatch', a
 
   jest.clearAllMocks();
   logseq.App.getCurrentGraph.mockResolvedValue({ path: '/replay/project' });
-  execSync.mockReturnValue(Buffer.from(''));
   exec.mockImplementation((_cmd, _opts, cb) => cb(null, 'output', ''));
 
   await registeredCommands['LucidPM Export']();
@@ -81,7 +77,6 @@ test('logseq_plugin_event_sequence_is_deterministic: suggest command dispatch', 
 
   jest.clearAllMocks();
   logseq.App.getCurrentGraph.mockResolvedValue({ path: '/replay/project' });
-  execSync.mockReturnValue(Buffer.from(''));
   exec.mockImplementation((_cmd, _opts, cb) => cb(null, 'output', ''));
 
   await registeredCommands['LucidPM Suggest']();
@@ -123,7 +118,6 @@ test('project resolution is deterministic: same settings produce same project pa
   const firstCwd = exec.mock.calls[0][1].cwd;
 
   jest.clearAllMocks();
-  execSync.mockReturnValue(Buffer.from(''));
   exec.mockImplementation((_cmd, _opts, cb) => cb(null, '', ''));
 
   await registeredCommands['LucidPM Sync']();
@@ -140,7 +134,6 @@ test('failure mode dispatch is deterministic: same absent project produces same 
 
   jest.clearAllMocks();
   logseq.App.getCurrentGraph.mockResolvedValue(null);
-  execSync.mockReturnValue(Buffer.from(''));
 
   await registeredCommands['LucidPM Sync']();
   const [, secondType] = logseq.UI.showMsg.mock.calls[0];
