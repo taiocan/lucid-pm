@@ -160,7 +160,7 @@ test('FP1: error message includes description of why command did not run', async
 
 test('FP2: lucid not available — lucid not invoked, ErrorMessage shown with detail', async () => {
   const err = new Error('spawn lucid ENOENT');
-  err.stderr = Buffer.from('lucid: command not found');
+  err.stderr = 'lucid: command not found';
   execSync.mockImplementation(() => { throw err; });
 
   await registeredCommands['LucidPM Sync']();
@@ -317,7 +317,7 @@ test('WSL mode: LucidNotAvailable shown when wsl lucid version fails', async () 
     explicit_project_path: '/home/arc/projects/lucidpm',
   };
   const err = new Error('wsl failed');
-  err.stderr = Buffer.from('bash: lucid: command not found');
+  err.stderr = 'bash: lucid: command not found';
   execSync.mockImplementation(() => { throw err; });
 
   await registeredCommands['LucidPM Sync']();

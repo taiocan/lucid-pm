@@ -58,8 +58,7 @@ function isLucidAvailable() {
     execSync(check, { stdio: 'pipe' });
     return { ok: true };
   } catch (err) {
-    const stderr = err.stderr instanceof Buffer ? err.stderr.toString('utf8').trim() : '';
-    const detail = stderr || err.message || String(err);
+    const detail = (err.stderr ? String(err.stderr).trim() : '') || err.message || String(err);
     return { ok: false, detail };
   }
 }
