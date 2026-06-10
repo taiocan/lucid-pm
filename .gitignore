@@ -5,3 +5,15 @@ node_modules/
 
 # openlore analysis artifacts
 .openlore/
+
+# verification ladder run logs (ephemeral)
+logs/
+
+# python cache
+**/__pycache__/
+*.pyc
+
+# logseq desktop generated files
+demo/journals/
+demo/logseq/bak/
+demo/logseq/pages/pages/

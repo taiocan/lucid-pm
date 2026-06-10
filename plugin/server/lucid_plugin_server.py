@@ -12,6 +12,7 @@ Default port: 7523
 """
 import http.server
 import json
+import socketserver
 import subprocess
 import sys
 
@@ -32,13 +33,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         project  = body.get('project') or None
         args     = body.get('args', [])
 
-        cmd    = ['lucid'] + args
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=project)
+        cmd = ['lucid'] + args
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=project)
+            data   = {
+                'ok':     result.returncode == 0,
+                'output': (result.stdout or result.stderr or '').strip(),
+            }
+        except (FileNotFoundError, OSError) as exc:
+            data = {'ok': False, 'output': str(exc)}
 
-        payload = json.dumps({
-            'ok':     result.returncode == 0,
-            'output': (result.stdout or result.stderr or '').strip(),
-        }).encode()
+        payload = json.dumps(data).encode()
 
         self.send_response(200)
         self.send_header('Content-Type',   'application/json')
@@ -56,8 +61,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass  # suppress per-request noise
 
 
+class ThreadingServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
+
 if __name__ == '__main__':
-    server = http.server.HTTPServer((BIND, PORT), Handler)
+    server = ThreadingServer((BIND, PORT), Handler)
     print(f'LucidPM plugin server listening on {BIND}:{PORT}', flush=True)
     try:
         server.serve_forever()

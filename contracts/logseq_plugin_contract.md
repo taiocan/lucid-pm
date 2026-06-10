@@ -96,6 +96,49 @@ And the PM sees an error message indicating `lucid` is not available
 And the error message is visible without leaving Logseq Desktop
 ```
 
+### Operational Path 1: EndpointUnavailable
+
+```gherkin
+Given the plugin is running in a sandboxed environment (no child_process available)
+And the companion server endpoint is not reachable
+  (server not started, port occupied by another process, or connection refused for any reason)
+When the PM invokes any plugin command
+Then the plugin shows a CompanionServerUnavailable error message
+And the error message includes the server port number and instructions to start the server
+And the plugin does not crash or hang
+```
+
+Note: from the plugin's perspective all connection-level failures are observable as a
+single class — the network error does not distinguish between "server down", "port occupied",
+or "wrong service". The contract models what is observable.
+
+### Operational Path 2: EndpointTimeout
+
+```gherkin
+Given a TCP connection to the companion server endpoint is established
+  and an HTTP request is sent
+And the server does not return a response within 60 seconds
+When the PM invokes any plugin command
+Then the plugin shows a CompanionServerTimeout error message
+And the error message includes the server port number
+And the plugin does not hang beyond the 60-second bound
+```
+
+Note: "reachable" is defined as TCP connection established and HTTP request sent.
+Failures before TCP connection are `CompanionServerUnavailable`; failures after response
+received are `MalformedServerResponse`. The three classes are non-overlapping.
+
+### Operational Path 3: MalformedResponse
+
+```gherkin
+Given the companion server is running and reachable
+And the server returns a response that is not valid JSON or is missing required fields
+When the PM invokes any plugin command
+Then the plugin shows a MalformedServerResponse indication
+And the message includes the phrase "invalid server response"
+And the plugin does not crash
+```
+
 ### Failure Path 3: CommandFailed
 
 ```gherkin
@@ -151,9 +194,12 @@ delegated `lucid` commands and are defined by their own contracts.
 
 | Failure Name | Trigger Condition | Observable Signal |
 |---|---|---|
-| ActiveProjectNotResolved | Active project cannot be determined | Error message shown in Logseq; no `lucid` invocation |
-| LucidNotAvailable | `lucid` binary not found on PATH at invocation time | Error message shown in Logseq; no operation performed |
-| CommandFailed | Delegated `lucid` command exits non-zero | Failure indication shown in Logseq with error output; visually distinct from success |
+| ActiveProjectNotResolved | Active project cannot be determined | Error message in Logseq; no `lucid` invocation |
+| LucidNotAvailable | `lucid` binary not found on PATH (direct child_process path) | Error message in Logseq; no operation performed |
+| CompanionServerUnavailable | Companion server endpoint not reachable for any reason (connection refused, wrong port, server not started) | Error message with port number and start instructions; no crash or hang |
+| CompanionServerTimeout | TCP established and HTTP request sent, no response within 60 seconds | Error message with port number; plugin returns within 60s bound |
+| MalformedServerResponse | Companion server returns invalid JSON or response missing required fields | Failure indication containing "invalid server response"; no crash |
+| CommandFailed | Delegated `lucid` command exits non-zero | Failure indication with error output from `lucid`; visually distinct from success |
 
 ---
 
@@ -162,5 +208,7 @@ status: APPROVED
 feature_id: logseq_plugin
 approved_by: human
 approved_at: 2026-06-09
+amended_at: 2026-06-10
+amendment: added OP1–OP4 operational path clauses; expanded LucidNotAvailable to cover companion server failure modes; added MalformedServerResponse failure class
 derived_from_intent: intents/logseq_plugin.md
 derived_event_schema: events/logseq_plugin_schema.md

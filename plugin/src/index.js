@@ -5,7 +5,8 @@
 
 /* global logseq, fetch */
 
-const SERVER_PORT = 7523;
+const SERVER_PORT       = parseInt(process.env.LUCID_SERVER_PORT       || '7523',  10);
+const SERVER_TIMEOUT_MS = parseInt(process.env.LUCID_SERVER_TIMEOUT_MS || '60000', 10);
 
 // First element of each array is the lucid subcommand; remaining are its flags.
 const COMMAND_ARGS = {
@@ -68,20 +69,38 @@ async function runDirect(subcommand, projectPath) {
 }
 
 async function runViaServer(subcommand, projectPath) {
+  const controller = new AbortController();
+  const timer      = setTimeout(() => controller.abort(), SERVER_TIMEOUT_MS);
   let response;
   try {
     response = await fetch(`http://localhost:${SERVER_PORT}/run`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ project: projectPath, args: COMMAND_ARGS[subcommand] }),
+      signal:  controller.signal,
     });
-  } catch (_) {
+    clearTimeout(timer);
+  } catch (err) {
+    clearTimeout(timer);
+    if (err.name === 'AbortError') {
+      throw new Error(
+        `CompanionServerTimeout: server at localhost:${SERVER_PORT} did not respond within ` +
+        `${SERVER_TIMEOUT_MS / 1000}s (CompanionServerTimeout). ` +
+        `Check that it is running: python3 plugin/server/lucid_plugin_server.py`
+      );
+    }
     throw new Error(
-      `Could not reach the LucidPM plugin server at localhost:${SERVER_PORT}. ` +
+      `CompanionServerUnavailable: could not reach localhost:${SERVER_PORT}. ` +
       `Start it in WSL: python3 plugin/server/lucid_plugin_server.py`
     );
   }
-  return response.json();
+
+  let payload;
+  try { payload = await response.json(); } catch (_) { payload = null; }
+  if (!payload || typeof payload.ok !== 'boolean') {
+    return { ok: false, output: `invalid server response from localhost:${SERVER_PORT}` };
+  }
+  return payload;
 }
 
 async function invokeCommand(subcommand) {
@@ -105,7 +124,7 @@ async function invokeCommand(subcommand) {
       : await runViaServer(subcommand, projectPath);
   } catch (err) {
     logseq.UI.showMsg(
-      `LucidPM — LucidNotAvailable: ${err.message}`,
+      `LucidPM — ${err.message}`,
       'error',
       { timeout: 10000 },
     );
