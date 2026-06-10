@@ -4,8 +4,8 @@
 
 /* global logseq */
 
-// child_process is required lazily inside functions to avoid blocking plugin
-// load and triggering Logseq's slow-startup timeout.
+// Logseq plugins run in a sandboxed iframe. Node.js modules are accessed via
+// window.require (Electron's renderer-side require), not the global require.
 
 const COMMAND_ARGS = {
   sync:    ['sync',    '--graph',      'logseq'],
@@ -50,12 +50,21 @@ async function resolveProject() {
   return graph?.path || null;
 }
 
+function getChildProcess() {
+  if (typeof require !== 'undefined') return require('child_process');
+  if (typeof window !== 'undefined' && typeof window.require !== 'undefined') {
+    return window.require('child_process');
+  }
+  return null;
+}
+
 function isLucidAvailable() {
   const wslMode = !!logseq.settings?.wsl_mode;
+  const cp = getChildProcess();
+  if (!cp) return { ok: false, detail: 'child_process not available in this Logseq version' };
   try {
-    const { execSync } = require('child_process');
     const check = wslMode ? 'wsl bash -l -c "lucid version"' : 'lucid version';
-    execSync(check, { stdio: 'pipe' });
+    cp.execSync(check, { stdio: 'pipe' });
     return { ok: true };
   } catch (err) {
     const detail = (err.stderr ? String(err.stderr).trim() : '') || err.message || String(err);
@@ -90,7 +99,17 @@ async function invokeCommand(subcommand) {
     return;
   }
 
-  const { exec } = require('child_process');
+  const cp = getChildProcess();
+  if (!cp) {
+    logseq.UI.showMsg(
+      'LucidPM — child_process not available in this Logseq version. ' +
+      'The plugin requires Node.js access (Logseq Desktop with nodeIntegration).',
+      'error',
+      { timeout: 10000 },
+    );
+    return;
+  }
+  const { exec } = cp;
   let cmd, execOptions;
 
   if (wslMode) {
