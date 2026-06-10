@@ -54,13 +54,13 @@ function isLucidAvailable() {
   const wslMode = !!logseq.settings?.wsl_mode;
   try {
     const { execSync } = require('child_process');
-    // Use a login shell in WSL mode so ~/.profile and ~/.bash_profile are
-    // sourced and lucid is on PATH even if installed via cargo or a custom dir.
     const check = wslMode ? 'wsl bash -l -c "lucid version"' : 'lucid version';
-    execSync(check, { stdio: 'ignore' });
-    return true;
-  } catch (_) {
-    return false;
+    execSync(check, { stdio: 'pipe' });
+    return { ok: true };
+  } catch (err) {
+    const stderr = err.stderr instanceof Buffer ? err.stderr.toString('utf8').trim() : '';
+    const detail = stderr || err.message || String(err);
+    return { ok: false, detail };
   }
 }
 
@@ -78,14 +78,15 @@ async function invokeCommand(subcommand) {
     return;
   }
 
-  if (!isLucidAvailable()) {
+  const lucidCheck = isLucidAvailable();
+  if (!lucidCheck.ok) {
     const hint = wslMode
       ? 'Install lucid in your WSL environment before using this plugin.'
       : 'Install lucid before using this plugin.';
     logseq.UI.showMsg(
-      `LucidPM — LucidNotAvailable: \`lucid\` was not found. ${hint}`,
+      `LucidPM — LucidNotAvailable: \`lucid\` was not found. ${hint}\n(${lucidCheck.detail})`,
       'error',
-      { timeout: 8000 },
+      { timeout: 12000 },
     );
     return;
   }

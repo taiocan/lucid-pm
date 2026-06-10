@@ -158,16 +158,19 @@ test('FP1: error message includes description of why command did not run', async
   expect(message.length).toBeGreaterThan(20);
 });
 
-test('FP2: lucid not available — lucid not invoked, ErrorMessage shown', async () => {
-  execSync.mockImplementation(() => { throw new Error('not found'); });
+test('FP2: lucid not available — lucid not invoked, ErrorMessage shown with detail', async () => {
+  const err = new Error('spawn lucid ENOENT');
+  err.stderr = Buffer.from('lucid: command not found');
+  execSync.mockImplementation(() => { throw err; });
 
   await registeredCommands['LucidPM Sync']();
 
   expect(exec).not.toHaveBeenCalled();
+  const [message] = logseq.UI.showMsg.mock.calls[0];
+  expect(message).toContain('LucidNotAvailable');
+  expect(message).toContain('lucid: command not found');
   expect(logseq.UI.showMsg).toHaveBeenCalledWith(
-    expect.stringContaining('LucidNotAvailable'),
-    'error',
-    expect.any(Object),
+    expect.any(String), 'error', expect.any(Object),
   );
 });
 
@@ -313,16 +316,16 @@ test('WSL mode: LucidNotAvailable shown when wsl lucid version fails', async () 
     wsl_mode: true,
     explicit_project_path: '/home/arc/projects/lucidpm',
   };
-  execSync.mockImplementation(() => { throw new Error('not found'); });
+  const err = new Error('wsl failed');
+  err.stderr = Buffer.from('bash: lucid: command not found');
+  execSync.mockImplementation(() => { throw err; });
 
   await registeredCommands['LucidPM Sync']();
 
   expect(exec).not.toHaveBeenCalled();
-  expect(logseq.UI.showMsg).toHaveBeenCalledWith(
-    expect.stringContaining('LucidNotAvailable'),
-    'error',
-    expect.any(Object),
-  );
+  const [message] = logseq.UI.showMsg.mock.calls[0];
+  expect(message).toContain('LucidNotAvailable');
+  expect(message).toContain('bash: lucid: command not found');
 });
 
 test('WSL mode off: lucid checked natively, not via wsl', async () => {
