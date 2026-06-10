@@ -12,25 +12,34 @@ the PM's explicit configuration; explicit configuration takes precedence.
 **Plugin command** — a registered action in Logseq Desktop that invokes a LucidPM
 operation against the active project.
 
+**Supported operation** — a LucidPM command explicitly exposed by the plugin.
+In v1: sync, export, suggest.
+
 ---
 
-Specifically:
-- PM can invoke sync, export, and suggest against the active project from inside
-  Logseq Desktop
-- PM can see the outcome of each command (success or failure) without leaving Logseq
+## Outcomes
+
+- PM can invoke supported LucidPM operations from Logseq Desktop without switching
+  to a terminal
+- PM can determine whether a requested operation succeeded or failed and receive
+  enough information to distinguish normal completion from an execution error
+- PM can operate on the intended LucidPM project without manually navigating to its
+  directory
+- PM can configure which LucidPM project the plugin targets when the Logseq graph
+  path is not the project directory
 
 ## Stable Guarantees
 
 - A plugin command produces the same result as invoking the equivalent `lucid`
   subcommand from the active project directory — there is no behavioral divergence
   between the plugin and the CLI
-- The active project is deterministic before a command is invoked: the graph path
-  is used to identify the project unless the PM has set an explicit override, in
-  which case the override is used
+- Before execution, the plugin deterministically identifies a single active project
+  using either the PM's configured override or the current graph path; if no unique
+  project can be determined, the command does not execute and the PM is informed
 - Command failure is visible to the PM — a failed command does not produce the same
   visible output as a successful one
-- The plugin introduces no data model of its own — all project state is managed
-  exclusively by `lucid`; the plugin is a trigger layer only
+- The plugin always reflects the same project state that LucidPM itself uses — it
+  is a trigger layer with no independent state
 
 ## Scope Boundary
 
@@ -44,8 +53,8 @@ This feature does NOT:
 ---
 
 <!-- METADATA -->
-status: DRAFT
+status: APPROVED
 feature_id: logseq_plugin
-approved_by:
-approved_at:
+approved_by: human
+approved_at: 2026-06-09
 derived_contracts: contracts/logseq_plugin_contract.md

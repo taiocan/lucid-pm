@@ -1,0 +1,7 @@
+{
+  "id": "lucidpm-logseq-plugin",
+  "name": "LucidPM",
+  "version": "0.1.0",
+  "main": "index.html",
+  "description": "Invoke LucidPM operations from Logseq Desktop without switching to a terminal"
+}
