@@ -12,12 +12,27 @@ Default port: 7523
 """
 import http.server
 import json
+import re
 import socketserver
 import subprocess
 import sys
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 7523
 BIND = '127.0.0.1'
+
+# Matches //wsl$/Ubuntu/... or \\wsl$\Ubuntu\... (any distro name)
+_WSL_UNC = re.compile(r'^[/\\]{2}wsl\$[/\\][^/\\]+', re.IGNORECASE)
+
+
+def wsl_to_linux(path: str) -> str:
+    """Convert a Windows WSL UNC path to its Linux equivalent.
+
+    Logseq on Windows reports graph paths as //wsl$/Ubuntu/home/...
+    The companion server runs on Linux and needs /home/... instead.
+    """
+    if _WSL_UNC.match(path):
+        path = _WSL_UNC.sub('', path).replace('\\', '/')
+    return path
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -30,7 +45,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         length   = int(self.headers.get('Content-Length', 0))
         body     = json.loads(self.rfile.read(length))
-        project  = body.get('project') or None
+        project  = wsl_to_linux(body.get('project') or '') or None
         args     = body.get('args', [])
 
         cmd = ['lucid'] + args
