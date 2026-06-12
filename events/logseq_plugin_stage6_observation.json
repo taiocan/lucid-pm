@@ -4,7 +4,7 @@
     "failure_class": "ActiveProjectNotResolved",
     "status": "VERIFIED",
     "layer": "L2a:behavioral",
-    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260610_221704/L2a:behavioral.log"
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260612_063549/L2a:behavioral.log"
   },
   {
     "contract_clause": "FP2",
@@ -18,69 +18,69 @@
     "failure_class": "CommandFailed",
     "status": "VERIFIED",
     "layer": "L2a:behavioral",
-    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260610_221704/L2a:behavioral.log"
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260612_063549/L2a:behavioral.log"
   },
   {
     "contract_clause": "HP1",
     "failure_class": null,
     "status": "VERIFIED",
     "layer": "L2a:behavioral",
-    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260610_221704/L2a:behavioral.log"
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260612_063549/L2a:behavioral.log"
   },
   {
     "contract_clause": "HP2",
     "failure_class": null,
     "status": "VERIFIED",
     "layer": "L2a:behavioral",
-    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260610_221704/L2a:behavioral.log"
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260612_063549/L2a:behavioral.log"
   },
   {
     "contract_clause": "HP3",
     "failure_class": null,
     "status": "VERIFIED",
     "layer": "L2a:behavioral",
-    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260610_221704/L2a:behavioral.log"
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260612_063549/L2a:behavioral.log"
   },
   {
     "contract_clause": "HP4",
     "failure_class": null,
     "status": "VERIFIED",
     "layer": "L2a:behavioral",
-    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260610_221704/L2a:behavioral.log"
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260612_063549/L2a:behavioral.log"
   },
   {
     "contract_clause": "HP5",
     "failure_class": null,
     "status": "VERIFIED",
     "layer": "L2a:behavioral",
-    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260610_221704/L2a:behavioral.log"
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260612_063549/L2a:behavioral.log"
   },
   {
     "contract_clause": "HP6",
     "failure_class": null,
     "status": "VERIFIED",
     "layer": "L2a:behavioral",
-    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260610_221704/L2a:behavioral.log"
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260612_063549/L2a:behavioral.log"
   },
   {
     "contract_clause": "OP1",
     "failure_class": "CompanionServerUnavailable",
     "status": "VERIFIED",
     "layer": "L2b:serialization",
-    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260610_221704/L2b:serialization.log"
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260612_063549/L2b:serialization.log"
   },
   {
     "contract_clause": "OP2",
     "failure_class": "CompanionServerTimeout",
     "status": "VERIFIED",
     "layer": "L4:e2e_contract",
-    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260610_221704/L4:e2e_contract.log"
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260612_063549/L4:e2e_contract.log"
   },
   {
     "contract_clause": "OP3",
     "failure_class": "MalformedServerResponse",
     "status": "VERIFIED",
     "layer": "L2b:serialization",
-    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260610_221704/L2b:serialization.log"
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260612_063549/L2b:serialization.log"
   }
 ]

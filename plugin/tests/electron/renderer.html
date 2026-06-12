@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>L5.5 Harness Renderer</title>
+</head>
+<body>
+<!--
+  Error capture MUST precede plugin script so window.onerror is registered before
+  src/index.js executes. Reports through __harness API exposed by preload.js.
+-->
+<script>
+  window.addEventListener('error', function (e) {
+    if (window.__harness) window.__harness.reportError(e.message);
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    if (window.__harness) window.__harness.reportError(String(e.reason));
+  });
+</script>
+<script src="../../src/index.js"></script>
+</body>
+</html>

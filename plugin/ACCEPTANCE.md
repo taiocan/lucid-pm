@@ -1,6 +1,8 @@
 # L6 — Manual Acceptance Checklist
 
-Run this checklist in real Logseq Desktop after all L1–L4 layers pass.
+Items 1 (plugin loads without errors) and 4 (ActiveProjectNotResolved) are now covered by
+the automated L5.5 Electron harness. Only UI-specific behavior that requires real Logseq
+Desktop remains here.
 
 Prerequisites:
 - Plugin loaded as unpacked developer plugin from `plugin/`
@@ -11,10 +13,15 @@ Prerequisites:
 
 | # | Contract | Check | Expected | Result |
 |---|----------|-------|----------|--------|
-| 1 | HP6 | Plugin loads | No errors in DevTools console | |
-| 2 | HP6 | Slash commands | All three visible in `/` palette: Sync, Export, Suggest | |
-| 3 | HP1 | `/LucidPM Sync` | Success notification appears; content matches `lucid sync` output | |
-| 4 | FP1 | Clear `explicit_project_path`, use graph not linked to a LucidPM project; invoke `/LucidPM Sync` | `ActiveProjectNotResolved` in error message | |
-| 5 | HP6 | Set `explicit_project_path`, restart Logseq, check plugin settings | Path persists across sessions | |
+| 1 | HP6 | Type `/` inside an editor block | All three slash commands visible: **LucidPM Sync**, **LucidPM Export**, **LucidPM Suggest** | |
+| 2 | HP1 | Select **LucidPM Sync** from the `/` palette | Success notification appears; message contains lucid sync output | |
+| 3 | HP6 | Set `explicit_project_path`, restart Logseq, run **LucidPM Sync** | Command uses the restored path (not graph inference); sync succeeds — test BEHAVIOR, not settings file | |
 
-Record pass/fail in the Result column. All five must pass before marking logseq_plugin Stage 9 fully verified.
+All three must pass before updating Stage 6 artifact FP2 to VERIFIED.
+
+Once passed, regenerate Stage 7:
+```bash
+python3 plugin/scripts/render_reconciliation.py \
+  events/logseq_plugin_stage6_observation.json \
+  > events/logseq_plugin_stage7_reconciliation.md
+```

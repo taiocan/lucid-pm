@@ -4,9 +4,11 @@
   "description": "Invoke LucidPM operations from Logseq Desktop without switching to a terminal",
   "main": "src/index.js",
   "scripts": {
-    "test": "jest"
+    "test": "jest",
+    "electron:test": "electron tests/electron/main.js --no-sandbox --disable-gpu --disable-dev-shm-usage"
   },
   "devDependencies": {
+    "electron": "^31.7.7",
     "jest": "^29.7.0"
   },
   "jest": {

@@ -5,8 +5,10 @@
 
 /* global logseq, fetch */
 
-const SERVER_PORT       = parseInt(process.env.LUCID_SERVER_PORT       || '7523',  10);
-const SERVER_TIMEOUT_MS = parseInt(process.env.LUCID_SERVER_TIMEOUT_MS || '60000', 10);
+// process is not available in sandboxed Electron renderers (Logseq plugin context)
+const _env = typeof process !== 'undefined' ? process.env : {};
+const SERVER_PORT       = parseInt(_env.LUCID_SERVER_PORT       || '7523',  10);
+const SERVER_TIMEOUT_MS = parseInt(_env.LUCID_SERVER_TIMEOUT_MS || '60000', 10);
 
 // First element of each array is the lucid subcommand; remaining are its flags.
 const COMMAND_ARGS = {

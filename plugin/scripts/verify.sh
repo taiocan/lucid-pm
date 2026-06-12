@@ -57,6 +57,9 @@ run_layer "L3:pytest_server" \
 run_layer "L4:e2e_contract" \
   bash -c "cd '$REPO_ROOT/plugin' && npm test -- --testPathPattern=e2e --runInBand --silent"
 
+run_layer "L5.5:electron_harness" \
+  bash -c "cd '$REPO_ROOT/plugin' && npm run electron:test"
+
 echo ""
 echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
 echo ""
