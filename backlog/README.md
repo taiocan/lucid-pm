@@ -43,6 +43,11 @@ Existing `pm_structuring` and `project_state` event schemas are untouched. Multi
 | R12 | `lucid` Stage 9 — dispatcher/MODULES sync enforcement | Refine | F13 | None | BACKLOG |
 | F14 | `logseq-plugin` — Logseq plugin for LucidPM commands | 8 — Developer Experience | F13 | None (shell invocation only) | BACKLOG |
 | F15 | `demo` — self-contained demo project and walkthrough for onboarding | 8 — Developer Experience | F13, all features installed | None (static files only) | COMPLETE |
+| R13 | `logseq_plugin` Stage 9 — Extract slash command; invoke `lucid extract` on current journal page from Logseq UI | 8 — Developer Experience | F14 (logseq_plugin) | None (shell invocation only) | BACKLOG |
+| R14 | `logseq_plugin` Stage 9 — Workflow step guidance in Extract and Export success messages | Refine | F14 (logseq_plugin) | None | BACKLOG |
+| R15 | `logseq_export` Stage 9 — Schema-driven Dashboard.md generation on export | Refine | F2, F11 | None | BACKLOG |
+| R16 | `logseq_export` Stage 9 — Suppress unassigned owner wiki-link in task blocks | Refine | F12, F14 | None | BACKLOG |
+| F16 | `task_extraction` — extraction creates task records assigned to existing work packages | 7 — Task Layer | pm_structuring (R6), F12, F7, F11 | Additive (new task record creation events from extraction path) | BACKLOG |
 
 Note: F2 depends on R1 so that Logseq export can include AI-proposed values from extraction.
 
@@ -101,10 +106,24 @@ R12 lucid Stage 9              ← dispatcher/MODULES sync enforcement;
 F14 logseq-plugin              ← invoke LucidPM commands from Logseq Desktop;
                                   JS plugin using child_process → lucid;
                                   depends on F13
+R13 logseq_plugin extract      ← LucidPM Extract slash command; passes current
+                                  page vault file path to lucid extract via
+                                  companion server; depends on F14
+R16 logseq_export Stage 9      ← suppress [[TBD]] owner wiki-link on task blocks;
+                                  domain predicate is_assigned(); depends on F12
+R14 logseq_plugin Stage 9      ← next-step guidance in Extract and Export success
+                                  messages; depends on F14
+R15 logseq_export Stage 9      ← schema-driven Dashboard.md on export; type slugs
+                                  from loaded schema; idempotent; depends on F2, F11
 ─────────────────────────────────────────────────────────────
 F15 demo                       ← self-contained demo project + WALKTHROUGH.md;
                                   covers full workflow including edge cases;
                                   static files only, no code changes
+─────────────────────────────────────────────────────────────
+F16 task_extraction            ← extraction creates task records (task_model) linked
+                                  to existing WPs via item_links; schema-driven types;
+                                  unresolvable tasks → unassigned (no WP creation);
+                                  depends on pm_structuring R6, F12, F7, F11
 ```
 
 F1 + R1 + F2 deliver: extraction with AI-suggested state → structured record → live Logseq pages.
