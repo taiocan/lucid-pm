@@ -60,6 +60,7 @@ planned and in-progress work, the backlog is the authoritative source.
 | R_task_scheduling + R_task_ownership (task_model + logseq_sync) | required owner (stakeholder item or TBD sentinel); optional scheduled/deadline dates; bidirectional Logseq sync for owner and dates | 9 | COMPLETE |
 | R_export_format (logseq_export + logseq_sync) | task blocks as native Logseq task blocks with :PROPERTIES: drawer; work package relations as page properties; dual-format sync parser | 9 | COMPLETE |
 | logseq_plugin | Logseq Desktop plugin: Sync/Export/Suggest slash commands; lucid delegation; SuccessIndication/FailureIndication/ErrorMessage feedback; explicit_project_path config | 9 | COMPLETE |
+| F16 (task_extraction) | WP-attributed task records from extraction: parent_item_id, schema-driven type resolution, default active marker, nested export render | 9 | COMPLETE |
 
 Stages: 1-Intent / 2-Contract / 3-Schema / 4-Implement / 5-Tests / 6-Observe / 7-Reconcile / 8-Replay / 9-Refine
 

@@ -22,6 +22,8 @@ enum Commands {
         /// Session ID — the correlation_id from pm_structuring's ExtractionConfirmed event
         session_id: String,
     },
+    /// Incorporate the most recently confirmed session that has not yet been incorporated
+    IncorporateLatest,
     /// View all recorded project items
     View,
 }
@@ -90,6 +92,7 @@ fn find_confirmed_items(session_id: &str) -> Result<Vec<RecordedItem>> {
             uncertain: item["uncertain"].as_bool().unwrap_or(false),
             uncertainty_reason: item["uncertainty_reason"].as_str().map(String::from),
             session_id: session_id.to_string(),
+            parent_item_id: item["parent_item_id"].as_str().map(String::from),
             ..Default::default()
         })
         .collect();
@@ -166,6 +169,33 @@ fn cmd_incorporate(session_id: &str) -> Result<()> {
     );
 
     Ok(())
+}
+
+fn read_all_confirmed_session_ids() -> Result<Vec<String>> {
+    let mut ids = Vec::new();
+    for event in open_event_log(Path::new(EVENTS_FILE))? {
+        let event = event?;
+        if event["event_type"].as_str() == Some("ExtractionConfirmed") {
+            if let Some(cid) = event["correlation_id"].as_str() {
+                ids.push(cid.to_string());
+            }
+        }
+    }
+    Ok(ids)
+}
+
+fn cmd_incorporate_latest() -> Result<()> {
+    let confirmed = read_all_confirmed_session_ids()?;
+    let incorporated: std::collections::HashSet<String> = read_incorporated_sessions()?
+        .into_iter().map(|(s, _)| s).collect();
+    let latest = confirmed.into_iter().rev().find(|s| !incorporated.contains(s));
+    match latest {
+        Some(session_id) => cmd_incorporate(&session_id),
+        None => {
+            println!("No unincorporated sessions found.");
+            Ok(())
+        }
+    }
 }
 
 fn cmd_view() -> Result<()> {
@@ -265,6 +295,7 @@ fn main() {
     let cli = Cli::parse();
     let result = match &cli.command {
         Commands::Incorporate { session_id } => cmd_incorporate(session_id),
+        Commands::IncorporateLatest => cmd_incorporate_latest(),
         Commands::View => cmd_view(),
     };
     if let Err(e) = result {

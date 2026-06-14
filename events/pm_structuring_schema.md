@@ -212,10 +212,41 @@ Each per-file pipeline uses its own file-level `correlation_id`.
 
 ---
 
+## F16: Task Extraction — WP Attribution Schema Additions
+
+### Change to `ItemsExtracted` (additive)
+
+Two new optional fields added to each item in the `items` array:
+
+- `parent_item_id`: `string (uuid-v4) | null` — UUID of the WP item in the project
+  record to which this task is attributed; `null` when attribution is absent or
+  unresolvable. Present only on items whose `item_type` resolves to the canonical
+  task blockType. Always `null` on non-task items.
+
+- `initial_marker`: `string | null` — the task marker assigned at extraction time,
+  derived from the schema's canonical task blockType marker vocabulary (first
+  active-equivalent marker). `null` on non-task items. When present, the value must
+  be a marker key declared in the schema's blockType marker mapping.
+
+Existing events where these fields are absent are treated as `null`
+(backward-compatible — no re-processing of historical events is required).
+
+### F16 Coverage Check
+
+| Contract Scenario | Schema Field | Status |
+|---|---|---|
+| HP1/HP2: WP-attributed task carries parent UUID | `parent_item_id` in `ItemsExtracted` item | COVERED |
+| HP3/HP4: Unassigned task carries no parent | `parent_item_id: null` in `ItemsExtracted` item | COVERED |
+| HP6: Default marker on extracted tasks | `initial_marker` in `ItemsExtracted` item | COVERED |
+| No new failure events | (none added) | COVERED |
+
+---
+
 <!-- METADATA -->
 status: APPROVED
 feature_id: pm_structuring
 approved_by:
 approved_at:
+refined_at: 2026-06-14 (F16: parent_item_id and initial_marker added to ItemsExtracted per-item fields)
 derived_from_intent: intents/pm_structuring.md
 derived_from_contract: contracts/pm_structuring_contract.md

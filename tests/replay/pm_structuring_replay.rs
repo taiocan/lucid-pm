@@ -21,7 +21,8 @@ const VALID_EVENT_TYPES: &[&str] = &[
 ];
 
 // R6: "unknown" is a valid item_type when the LLM produces a type not recognized by the vocabulary
-const VALID_ITEM_TYPES: &[&str] = &["task", "milestone", "risk", "issue", "stakeholder", "unknown"];
+// F16: "workpackage" added — WP items appear in extraction sessions (pre-seeded and extracted)
+const VALID_ITEM_TYPES: &[&str] = &["task", "milestone", "risk", "issue", "stakeholder", "workpackage", "unknown"];
 
 const VALID_STATUSES_BY_TYPE: &[(&str, &[&str])] = &[
     ("task",        &["todo", "doing", "done", "waiting", "cancelled"]),
@@ -664,5 +665,160 @@ fn test_unknown_type_fixture_all_events_have_required_base_fields() {
         assert!(event["payload"].is_object(),               "{}: payload must be an object", t);
         assert_eq!(event["source_module"].as_str().unwrap(), "pm_structuring",
             "{}: source_module must be 'pm_structuring'", t);
+    }
+}
+
+// ── F16: WP attribution replay ────────────────────────────────────────────────
+
+fn f16_wp_attribution_events() -> Vec<Value> {
+    load_fixture("pm_structuring_f16_wp_attribution.jsonl")
+}
+
+fn f16_task_items(events: &[Value]) -> Vec<Value> {
+    events.iter()
+        .filter(|e| e["event_type"] == "ItemsExtracted")
+        .flat_map(|e| e["payload"]["items"].as_array().cloned().unwrap_or_default())
+        .filter(|i| i["item_type"].as_str() == Some("task"))
+        .collect()
+}
+
+#[test]
+fn test_f16_fixture_all_events_have_required_base_fields() {
+    let events = f16_wp_attribution_events();
+    assert!(!events.is_empty(), "F16 fixture must not be empty");
+    for event in &events {
+        let t = event["event_type"].as_str().unwrap_or("unknown");
+        assert!(event["event_id"].as_str().is_some(),       "{}: event_id required", t);
+        assert!(event["event_type"].as_str().is_some(),     "{}: event_type required", t);
+        assert!(event["timestamp"].as_u64().is_some(),      "{}: timestamp required", t);
+        assert!(event["correlation_id"].as_str().is_some(), "{}: correlation_id required", t);
+        assert!(event["source_module"].as_str().is_some(),  "{}: source_module required", t);
+        assert!(event["payload"].is_object(),               "{}: payload must be object", t);
+        assert_eq!(event["source_module"].as_str().unwrap(), "pm_structuring",
+            "{}: source_module must be 'pm_structuring'", t);
+    }
+}
+
+#[test]
+fn test_f16_fixture_task_items_have_parent_item_id_field() {
+    let events = f16_wp_attribution_events();
+    let tasks = f16_task_items(&events);
+    assert!(!tasks.is_empty(), "F16 fixture must contain task items");
+    for task in &tasks {
+        assert!(task.get("parent_item_id").is_some(),
+            "task item missing parent_item_id field: {:?}", task["description"]);
+    }
+}
+
+#[test]
+fn test_f16_fixture_task_items_have_nonnull_parent_item_id() {
+    let events = f16_wp_attribution_events();
+    let tasks = f16_task_items(&events);
+    for task in &tasks {
+        let pid = &task["parent_item_id"];
+        assert!(!pid.is_null(), "task '{}' has null parent_item_id", task["description"]);
+        let pid_str = pid.as_str().unwrap();
+        assert!(!pid_str.is_empty(), "task '{}' has empty parent_item_id", task["description"]);
+    }
+}
+
+#[test]
+fn test_f16_fixture_task_parent_references_known_wp_uuid() {
+    let events = f16_wp_attribution_events();
+    // Collect all WP item_ids from ItemsExtracted events
+    let wp_ids: std::collections::HashSet<String> = events.iter()
+        .filter(|e| e["event_type"] == "ItemsExtracted")
+        .flat_map(|e| e["payload"]["items"].as_array().cloned().unwrap_or_default())
+        .filter(|i| i["item_type"].as_str() == Some("workpackage"))
+        .filter_map(|i| i["item_id"].as_str().map(String::from))
+        .collect();
+    assert!(!wp_ids.is_empty(), "Fixture must contain at least one workpackage item");
+
+    let tasks = f16_task_items(&events);
+    for task in &tasks {
+        if let Some(pid) = task["parent_item_id"].as_str() {
+            assert!(wp_ids.contains(pid),
+                "task '{}' parent_item_id '{}' does not reference a known WP UUID",
+                task["description"].as_str().unwrap_or("?"), pid);
+        }
+    }
+}
+
+#[test]
+fn test_f16_fixture_task_items_have_initial_marker_field() {
+    let events = f16_wp_attribution_events();
+    let tasks = f16_task_items(&events);
+    for task in &tasks {
+        assert!(task.get("initial_marker").is_some(),
+            "task item missing initial_marker field: {:?}", task["description"]);
+    }
+}
+
+#[test]
+fn test_f16_fixture_task_initial_marker_is_nonnull_string() {
+    let events = f16_wp_attribution_events();
+    let tasks = f16_task_items(&events);
+    for task in &tasks {
+        let m = &task["initial_marker"];
+        assert!(!m.is_null(), "task '{}' has null initial_marker", task["description"]);
+        assert!(m.as_str().is_some(), "task '{}' initial_marker not a string", task["description"]);
+    }
+}
+
+#[test]
+fn test_f16_fixture_wp_item_has_null_initial_marker() {
+    let events = f16_wp_attribution_events();
+    let wp_items: Vec<Value> = events.iter()
+        .filter(|e| e["event_type"] == "ItemsExtracted")
+        .flat_map(|e| e["payload"]["items"].as_array().cloned().unwrap_or_default())
+        .filter(|i| i["item_type"].as_str() == Some("workpackage"))
+        .collect();
+    assert!(!wp_items.is_empty(), "Fixture must contain workpackage items");
+    for wp in &wp_items {
+        assert!(wp["initial_marker"].is_null(),
+            "WP item should have null initial_marker, got: {:?}", wp["initial_marker"]);
+    }
+}
+
+#[test]
+fn test_f16_fixture_two_distinct_correlation_ids() {
+    let events = f16_wp_attribution_events();
+    let cids: std::collections::HashSet<&str> = events.iter()
+        .filter_map(|e| e["correlation_id"].as_str())
+        .collect();
+    assert_eq!(cids.len(), 2, "F16 fixture should have exactly 2 correlation IDs (seed + f16 session), got {:?}", cids);
+}
+
+#[test]
+fn test_f16_fixture_confirmed_ids_match_extracted_task_ids() {
+    let events = f16_wp_attribution_events();
+    // Find the F16 extraction session (the one with task items)
+    let f16_corr = events.iter()
+        .filter(|e| e["event_type"] == "ItemsExtracted")
+        .find(|e| e["payload"]["items"].as_array()
+            .map(|arr| arr.iter().any(|i| i["item_type"] == "task"))
+            .unwrap_or(false))
+        .and_then(|e| e["correlation_id"].as_str())
+        .expect("F16 session ItemsExtracted not found");
+
+    let extracted_ids: Vec<&str> = events.iter()
+        .find(|e| e["event_type"] == "ItemsExtracted"
+            && e["correlation_id"].as_str() == Some(f16_corr))
+        .and_then(|e| e["payload"]["items"].as_array())
+        .map(|arr| arr.iter().filter_map(|i| i["item_id"].as_str()).collect())
+        .unwrap_or_default();
+
+    let confirmed_ids: Vec<&str> = events.iter()
+        .find(|e| e["event_type"] == "ExtractionConfirmed"
+            && e["correlation_id"].as_str() == Some(f16_corr))
+        .and_then(|e| e["payload"]["accepted_item_ids"].as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    assert_eq!(extracted_ids.len(), confirmed_ids.len(),
+        "F16 session: extracted item count must match confirmed count");
+    for id in &extracted_ids {
+        assert!(confirmed_ids.contains(id),
+            "Extracted task id '{}' not in confirmed list", id);
     }
 }

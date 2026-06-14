@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 mod extractor;
-use extractor::extract_items;
+use extractor::{extract_items, WpRecord};
 
 const SOURCE_MODULE: &str = "pm_structuring";
 
@@ -45,9 +45,91 @@ fn already_processed_files() -> HashSet<String> {
     set
 }
 
+// Read all WP-equivalent items from the project record (via incorporated sessions).
+// WP type is resolved from schema alias "workpackage" — never hardcoded.
+fn read_wp_items(schema: &ProjectSchema) -> Vec<WpRecord> {
+    use project_schema::resolve_type;
+
+    let wp_canonical = match resolve_type(schema, "workpackage") {
+        Some(c) => c.to_string(),
+        None => return Vec::new(),
+    };
+
+    let incorporated: Vec<String> = {
+        let content = match fs::read_to_string(EVENTS_FILE) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let mut sessions = Vec::new();
+        for line in content.lines() {
+            if line.is_empty() { continue; }
+            if let Ok(ev) = serde_json::from_str::<Value>(line) {
+                if ev["event_type"] == "ItemsIncorporated" {
+                    if let Some(sid) = ev["payload"]["session_id"].as_str() {
+                        sessions.push(sid.to_string());
+                    }
+                }
+            }
+        }
+        sessions
+    };
+
+    let content = match fs::read_to_string(EVENTS_FILE) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut wp_items: Vec<WpRecord> = Vec::new();
+
+    for session_id in &incorporated {
+        let mut extracted_items: Vec<Value> = Vec::new();
+        let mut accepted_ids: Vec<String> = Vec::new();
+
+        for line in content.lines() {
+            if line.is_empty() { continue; }
+            let ev: Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if ev["correlation_id"].as_str() != Some(session_id) { continue; }
+            match ev["event_type"].as_str() {
+                Some("ItemsExtracted") => {
+                    if let Some(arr) = ev["payload"]["items"].as_array() {
+                        extracted_items = arr.clone();
+                    }
+                }
+                Some("ExtractionConfirmed") => {
+                    if let Some(arr) = ev["payload"]["accepted_item_ids"].as_array() {
+                        accepted_ids = arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect();
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for item in &extracted_items {
+            let id = match item["item_id"].as_str() { Some(s) => s, None => continue };
+            if !accepted_ids.contains(&id.to_string()) { continue; }
+            let item_type = item["item_type"].as_str().unwrap_or("");
+            if resolve_type(schema, item_type) == Some(&wp_canonical) {
+                if let Some(desc) = item["description"].as_str() {
+                    wp_items.push(WpRecord {
+                        uuid: id.to_string(),
+                        description: desc.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    wp_items
+}
+
 // Runs the full extraction pipeline for a single block of text.
 // Schema is validated before this function is called; it is passed as a reference.
-async fn run_extraction(source_text: String, source_file: Option<&str>, auto_confirm: bool, schema: &ProjectSchema) {
+async fn run_extraction(source_text: String, source_file: Option<&str>, auto_confirm: bool, schema: &ProjectSchema, wp_items: &[WpRecord]) {
     let correlation_id = Uuid::new_v4().to_string();
     let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
@@ -64,7 +146,7 @@ async fn run_extraction(source_text: String, source_file: Option<&str>, auto_con
         std::process::exit(1);
     }
 
-    let items = match extract_items(&source_text, schema).await {
+    let items = match extract_items(&source_text, schema, wp_items).await {
         Ok(items) => items,
         Err(e) => {
             eprintln!("Error: API request failed: {}", e);
@@ -94,6 +176,8 @@ async fn run_extraction(source_text: String, source_file: Option<&str>, auto_con
         "uncertainty_reason": i.uncertainty_reason,
         "proposed_status": i.proposed_status,
         "proposed_priority": i.proposed_priority,
+        "parent_item_id": i.parent_item_id,
+        "initial_marker": i.initial_marker,
     })).collect();
 
     emitter.emit("ItemsExtracted", &correlation_id, json!({
@@ -144,7 +228,7 @@ async fn run_extraction(source_text: String, source_file: Option<&str>, auto_con
     }
 }
 
-async fn cmd_folder(folder_path: String, auto_confirm: bool, schema: &ProjectSchema) {
+async fn cmd_folder(folder_path: String, auto_confirm: bool, schema: &ProjectSchema, wp_items: &[WpRecord]) {
     let folder_correlation_id = Uuid::new_v4().to_string();
     let emitter = EventEmitter::new(Path::new(EVENTS_FILE), SOURCE_MODULE);
 
@@ -199,7 +283,7 @@ async fn cmd_folder(folder_path: String, auto_confirm: bool, schema: &ProjectSch
                 continue;
             }
             println!("\n=== Processing: {} ===", filename);
-            run_extraction(content, Some(filename), auto_confirm, schema).await;
+            run_extraction(content, Some(filename), auto_confirm, schema, wp_items).await;
             files_processed += 1;
         }
 
@@ -228,8 +312,10 @@ async fn main() {
         None => std::process::exit(1),
     };
 
+    let wp_items = read_wp_items(&schema);
+
     if let Some(folder_path) = get_folder_arg() {
-        cmd_folder(folder_path, auto_confirm, &schema).await;
+        cmd_folder(folder_path, auto_confirm, &schema, &wp_items).await;
         return;
     }
 
@@ -242,5 +328,5 @@ async fn main() {
         source_text.push('\n');
     }
     let source_text = source_text.trim_end().to_string();
-    run_extraction(source_text, None, auto_confirm, &schema).await;
+    run_extraction(source_text, None, auto_confirm, &schema, &wp_items).await;
 }

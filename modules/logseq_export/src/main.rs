@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use lucid_core::{open_event_log, EventEmitter, RecordedItem, EVENTS_FILE};
 use project_schema::{
-    emit_type_unknown, is_block_type, load_and_validate, logseq_forward_label,
-    logseq_inverse_label, resolve_type, ProjectSchema,
+    canonical_task_block_type, emit_type_unknown, is_block_type, load_and_validate,
+    logseq_forward_label, logseq_inverse_label, resolve_type, ProjectSchema,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -13,6 +13,13 @@ use uuid::Uuid;
 
 const SOURCE_MODULE: &str = "logseq_export";
 const TBD_OWNER_ID: &str = "TBD";
+
+/// Returns true when the task has a named stakeholder owner.
+/// Encapsulates the TBD placeholder sentinel from task_model so that
+/// rendering logic never branches on a raw owner representation.
+fn is_assigned(owner_id: &str) -> bool {
+    owner_id != TBD_OWNER_ID
+}
 
 #[derive(Parser)]
 #[command(about = "Export the project record as Logseq pages")]
@@ -78,6 +85,8 @@ fn find_confirmed_items(session_id: &str) -> Result<Vec<RecordedItem>> {
             item_id: item["item_id"].as_str().unwrap_or("").to_string(),
             item_type: item["item_type"].as_str().unwrap_or("").to_string(),
             description: item["description"].as_str().unwrap_or("").to_string(),
+            parent_item_id: item["parent_item_id"].as_str().map(String::from),
+            current_marker: item["initial_marker"].as_str().map(String::from),
             ..Default::default()
         })
         .collect();
@@ -458,6 +467,89 @@ fn render_work_package_page(
     )
 }
 
+/// Write Dashboard.md to pages_dir if it does not already exist.
+/// Resolves each operational type via canonical key or alias so that a user who
+/// renames WorkPackage to Workstream (with alias "workpackage") gets "workstream"
+/// in the query, not a hardcoded "work-package" string.
+fn generate_dashboard(pages_dir: &Path, schema: &ProjectSchema) {
+    let dashboard_path = pages_dir.join("Dashboard.md");
+    if dashboard_path.exists() {
+        return;
+    }
+
+    let mut sections: Vec<String> = Vec::new();
+
+    // Macro for page-type query sections: resolve via alias, derive slug from canonical key.
+    macro_rules! push_page_section {
+        ($alias:expr, $title:expr) => {
+            if let Some(canonical) = resolve_type(schema, $alias) {
+                if !is_block_type(schema, canonical) {
+                    let slug = type_to_logseq_tag(canonical);
+                    sections.push(format!(
+                        concat!(
+                            "- #+BEGIN_QUERY\n",
+                            "  {{\n",
+                            "   :title \"{}\"\n",
+                            "   :query [\n",
+                            "     :find (pull ?p [*])\n",
+                            "     :where\n",
+                            "     [?p :block/properties ?props]\n",
+                            "     [(get ?props :type) ?type]\n",
+                            "     [(= ?type \"{}\")]\n",
+                            "   ]\n",
+                            "  }}\n",
+                            "  #+END_QUERY",
+                        ),
+                        $title, slug
+                    ));
+                }
+            }
+        };
+    }
+
+    push_page_section!("milestone",   "Pending Milestones");
+    push_page_section!("workpackage", "Active Work Packages");
+
+    // Task blockType: active markers derived from schema (never terminal statuses).
+    if let Some((_, markers)) = canonical_task_block_type(schema) {
+        let mut active_markers: Vec<String> = markers.iter()
+            .filter(|(_, status)| !matches!(status.as_str(), "done" | "cancelled"))
+            .map(|(m, _)| format!("\"{}\"", m))
+            .collect();
+        active_markers.sort();
+        let marker_set = if active_markers.is_empty() {
+            "#{}".to_string()
+        } else {
+            format!("#{{{}}}", active_markers.join(" "))
+        };
+        sections.push(format!(
+            concat!(
+                "- #+BEGIN_QUERY\n",
+                "  {{\n",
+                "   :title \"Open Tasks\"\n",
+                "   :query [\n",
+                "     :find (pull ?b [*])\n",
+                "     :where\n",
+                "     [?b :block/marker ?marker]\n",
+                "     [(contains? {} ?marker)]\n",
+                "   ]\n",
+                "  }}\n",
+                "  #+END_QUERY",
+            ),
+            marker_set
+        ));
+    }
+
+    push_page_section!("risk",        "Risk Pages");
+    push_page_section!("stakeholder", "Active Stakeholders");
+
+    if sections.is_empty() {
+        return;
+    }
+
+    let _ = fs::write(&dashboard_path, sections.join("\n\n"));
+}
+
 fn check_output_dir_writable(pages_dir: &Path) -> bool {
     let test_path = pages_dir.join(".write_check");
     match fs::write(&test_path, b"") {
@@ -479,6 +571,8 @@ fn remove_stale_pages(pages_dir: &Path, current_slugs: &[String]) {
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
+        // Dashboard.md is never a project item page; preserve it unconditionally.
+        if stem == "Dashboard" { continue; }
         if !current_slugs.contains(&stem) {
             let _ = fs::remove_file(&path);
         }
@@ -621,12 +715,18 @@ fn cmd_export(output_dir: &str) -> Result<()> {
             for task in child_tasks {
                 let marker = task.current_marker.as_deref().unwrap_or("TODO");
                 let owner_id = task.owner_id.as_deref().unwrap_or(TBD_OWNER_ID);
-                let owner_ref = if owner_id == TBD_OWNER_ID {
-                    "TBD".to_string()
+                if is_assigned(owner_id) {
+                    let owner_slug = slug_map
+                        .get(owner_id)
+                        .cloned()
+                        .unwrap_or_else(|| owner_id.to_string());
+                    content.push_str(&format!(
+                        "\n- {} {} [[{}]]\n",
+                        marker, task.description, owner_slug
+                    ));
                 } else {
-                    slug_map.get(owner_id).cloned().unwrap_or_else(|| "TBD".to_string())
-                };
-                content.push_str(&format!("\n- {} {} [[{}]]\n", marker, task.description, owner_ref));
+                    content.push_str(&format!("\n- {} {}\n", marker, task.description));
+                }
                 content.push_str(&format!("  :PROPERTIES:\n  :task-id: {}\n  :END:\n", task.item_id));
                 if let Some(ref sched) = task.scheduled_date {
                     content.push_str(&format!("  SCHEDULED: {}\n", format_logseq_date(sched)));
@@ -649,6 +749,8 @@ fn cmd_export(output_dir: &str) -> Result<()> {
         .filter_map(|(item, _)| slug_map.get(&item.item_id).cloned())
         .collect();
     remove_stale_pages(&pages_dir, &current_slugs);
+
+    generate_dashboard(&pages_dir, &schema);
 
     let item_count = (page_items.len() + task_items.len()) as u64;
     println!(

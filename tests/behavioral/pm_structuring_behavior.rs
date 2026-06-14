@@ -1185,6 +1185,115 @@ fn test_r6_custom_vocabulary_proposed_status_from_vocabulary_status_set() {
     }
 }
 
+// ── F16: WP attribution fields in ItemsExtracted payload ──────────────────────
+
+const TASK_BLOCKTYPE_SCHEMA: &str = "schemaVersion: 1
+pageTypes:
+  WorkPackage:
+    aliases: [workpackage]
+    allowedStatuses: [todo, doing, done]
+  Risk:
+    aliases: [risk]
+    allowedStatuses: [open, closed]
+blockTypes:
+  task:
+    markers:
+      TODO: todo
+      DOING: doing
+      DONE: done
+";
+
+#[test]
+fn test_f16_items_extracted_has_parent_item_id_field() {
+    // HP3/HP4: every item in ItemsExtracted must carry a parent_item_id field.
+    // The value may be null (when no WP is attributed), but the field must be present.
+    if !gemini_key_available() { return; }
+    let dir = setup_temp_dir();
+    run_binary_with_args(
+        &dir,
+        b"Deploy the release by end of week.\n",
+        &["--yes"],
+    );
+
+    let events = read_events(&dir);
+    if let Some(extracted) = events.iter().find(|e| e["event_type"] == "ItemsExtracted") {
+        let items = extracted["payload"]["items"].as_array()
+            .expect("ItemsExtracted payload must have items array");
+        assert!(!items.is_empty(), "at least one item must be extracted");
+        for item in items {
+            assert!(
+                item.get("parent_item_id").is_some(),
+                "each item in ItemsExtracted must have a parent_item_id field (null or uuid), got:\n{}",
+                item
+            );
+        }
+    }
+}
+
+#[test]
+fn test_f16_items_extracted_has_initial_marker_field() {
+    // HP6: every item in ItemsExtracted must carry an initial_marker field.
+    // For task blockType items this is non-null; for others it is null.
+    if !gemini_key_available() { return; }
+    let dir = setup_temp_dir();
+    run_binary_with_args(
+        &dir,
+        b"Set up CI pipeline. Write unit tests. Configure deployment.\n",
+        &["--yes"],
+    );
+
+    let events = read_events(&dir);
+    if let Some(extracted) = events.iter().find(|e| e["event_type"] == "ItemsExtracted") {
+        let items = extracted["payload"]["items"].as_array()
+            .expect("ItemsExtracted payload must have items array");
+        assert!(!items.is_empty(), "at least one item must be extracted");
+        for item in items {
+            assert!(
+                item.get("initial_marker").is_some(),
+                "each item in ItemsExtracted must have an initial_marker field (null or marker string), got:\n{}",
+                item
+            );
+        }
+    }
+}
+
+#[test]
+fn test_f16_task_item_has_non_null_initial_marker_with_task_schema() {
+    // HP6: when schema declares a task blockType, items typed as that blockType must have
+    // a non-null initial_marker derived from the schema's marker vocabulary.
+    if !gemini_key_available() { return; }
+    let dir = setup_temp_dir();
+    write_project_schema(&dir, TASK_BLOCKTYPE_SCHEMA);
+
+    run_binary_isolated(
+        &dir,
+        b"Set up CI pipeline. Write unit tests.\n",
+        &["--yes"],
+    );
+
+    let events = read_events(&dir);
+    if let Some(extracted) = events.iter().find(|e| e["event_type"] == "ItemsExtracted") {
+        let items = extracted["payload"]["items"].as_array()
+            .expect("ItemsExtracted payload must have items array");
+        for item in items {
+            let item_type = item["item_type"].as_str().unwrap_or("");
+            if item_type == "task" {
+                let marker = item["initial_marker"].as_str();
+                assert!(
+                    marker.is_some(),
+                    "task item must have non-null initial_marker when schema declares task blockType, got:\n{}",
+                    item
+                );
+                let m = marker.unwrap();
+                assert!(
+                    ["TODO", "DOING", "DONE", "WAITING", "CANCELLED"].contains(&m),
+                    "initial_marker '{}' must be a schema-declared marker", m
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn test_r6_unknown_item_satisfies_uncertainty_invariants() {
     if !gemini_key_available() { return; }

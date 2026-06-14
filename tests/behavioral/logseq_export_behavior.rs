@@ -883,7 +883,8 @@ fn test_task_block_has_no_tasks_section_header() {
 }
 
 #[test]
-fn test_task_block_tbd_owner_renders_tbd_ref() {
+fn test_task_block_tbd_owner_omits_wiki_link() {
+    // R16: TBD placeholder owner → no owner reference of any kind on the block line.
     let dir = setup_temp_dir();
     write_schema_file(&dir, WP_SCHEMA);
     seed_incorporated_items(&dir, SESSION_A, &[(ITEM_WP, "work_package", "Sprint Alpha", None, None)]);
@@ -895,9 +896,98 @@ fn test_task_block_tbd_owner_renders_tbd_ref() {
     let content = fs::read_to_string(page_path(&output_dir, "sprint-alpha"))
         .expect("sprint-alpha.md must exist");
     assert!(
-        content.contains("[[TBD]]"),
-        "TBD-owned task must render [[TBD]] in the block line"
+        !content.contains("[[TBD]]"),
+        "TBD-owned task must NOT render [[TBD]] in the block line, got:\n{}",
+        content
     );
+    assert!(
+        content.contains("- TODO Test task\n"),
+        "TBD-owned task block line must be '- MARKER description' with no owner reference, got:\n{}",
+        content
+    );
+}
+
+#[test]
+fn test_tbd_owner_no_wiki_link_pattern_of_any_kind() {
+    // R16 falsification: TBD owner → no [[...]] pattern of any kind on the block line.
+    // Falsifies: implementation that always emits some owner wiki-link (e.g. [[TBD]], [[unassigned]]).
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_WP, "work_package", "Sprint Alpha", None, None)]);
+    seed_task_added(&dir, TASK_ID_1, ITEM_WP, "TODO", "TBD", None, None);
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let content = fs::read_to_string(page_path(&output_dir, "sprint-alpha"))
+        .expect("sprint-alpha.md must exist");
+    let task_line = content
+        .lines()
+        .find(|l| l.trim_start().starts_with("- TODO Test task"))
+        .expect("Task block line must exist in page content");
+    assert!(
+        !task_line.contains("[["),
+        "TBD-owned task block line must contain no [[...]] pattern of any kind, got: {:?}",
+        task_line
+    );
+}
+
+#[test]
+fn test_tbd_owner_does_not_suppress_properties_drawer_and_dates() {
+    // R16 boundary + falsification: TBD owner with dates → PROPERTIES drawer, SCHEDULED,
+    // and DEADLINE all present. Falsifies: implementation that strips drawer alongside owner ref.
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_incorporated_items(&dir, SESSION_A, &[(ITEM_WP, "work_package", "Sprint Alpha", None, None)]);
+    seed_task_added(&dir, TASK_ID_1, ITEM_WP, "TODO", "TBD", Some("2026-06-15"), Some("2026-06-30"));
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let content = fs::read_to_string(page_path(&output_dir, "sprint-alpha"))
+        .expect("sprint-alpha.md must exist");
+    assert!(content.contains("  :PROPERTIES:"), "TBD-owner task must still have :PROPERTIES: drawer");
+    assert!(
+        content.contains(&format!("  :task-id: {}", TASK_ID_1)),
+        "TBD-owner task must still carry :task-id: in the properties drawer"
+    );
+    assert!(content.contains("  :END:"), "TBD-owner task must still have :END:");
+    assert!(
+        content.contains("  SCHEDULED: <2026-06-15 Mon>"),
+        "TBD-owner task must still render SCHEDULED line, got:\n{}",
+        content
+    );
+    assert!(
+        content.contains("  DEADLINE: <2026-06-30 Tue>"),
+        "TBD-owner task must still render DEADLINE line, got:\n{}",
+        content
+    );
+}
+
+#[test]
+fn test_task_block_named_owner_with_dates_renders_wiki_link_and_dates() {
+    // R16 happy path: named owner + dates → block line has [[owner-slug]], SCHEDULED, DEADLINE.
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_WP, "work_package", "Sprint Alpha", None, None),
+          (ITEM_SH, "stakeholder", "Alice Stakeholder", None, None)],
+    );
+    seed_task_added(&dir, TASK_ID_1, ITEM_WP, "DOING", ITEM_SH, Some("2026-06-15"), Some("2026-06-30"));
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let content = fs::read_to_string(page_path(&output_dir, "sprint-alpha"))
+        .expect("sprint-alpha.md must exist");
+    assert!(
+        content.contains("- DOING Test task [[alice-stakeholder]]"),
+        "Named-owner task with dates must render '- MARKER description [[owner-slug]]', got:\n{}",
+        content
+    );
+    assert!(content.contains("  SCHEDULED: <2026-06-15 Mon>"), "SCHEDULED must be present");
+    assert!(content.contains("  DEADLINE: <2026-06-30 Tue>"), "DEADLINE must be present");
 }
 
 #[test]
@@ -1045,5 +1135,514 @@ fn test_non_work_package_relations_remain_content_sections() {
     assert!(
         !content.contains("owns::"),
         "Non-work-package items must NOT render relations as page properties"
+    );
+}
+
+// ── R15: Dashboard.md generation ─────────────────────────────────────────────
+
+// Schema with all five operational types present.
+const DASHBOARD_SCHEMA_FULL: &str = "schemaVersion: 1
+pageTypes:
+  Milestone:
+    aliases: [milestone]
+  WorkPackage:
+    aliases: [workpackage]
+  Risk:
+    aliases: [risk]
+  Stakeholder:
+    aliases: [stakeholder]
+blockTypes:
+  task:
+    markers:
+      TODO: todo
+      DOING: doing
+      DONE: done
+";
+
+// Schema without Milestone.
+const DASHBOARD_SCHEMA_NO_MILESTONE: &str = "schemaVersion: 1
+pageTypes:
+  WorkPackage:
+    aliases: [workpackage]
+  Risk:
+    aliases: [risk]
+  Stakeholder:
+    aliases: [stakeholder]
+blockTypes:
+  task:
+    markers:
+      TODO: todo
+      DOING: doing
+      DONE: done
+";
+
+// Schema with no recognized operational types.
+const DASHBOARD_SCHEMA_NO_OP_TYPES: &str = "schemaVersion: 1
+pageTypes:
+  CustomType:
+    aliases: []
+";
+
+// Schema where work-package equivalent has canonical key \"Workstream\" (alias \"workpackage\").
+// Falsifies hardcoded \"work-package\" in Dashboard query.
+const DASHBOARD_SCHEMA_WORKSTREAM: &str = "schemaVersion: 1
+pageTypes:
+  Workstream:
+    aliases: [workpackage]
+  Risk:
+    aliases: [risk]
+blockTypes:
+  task:
+    markers:
+      TODO: todo
+      DOING: doing
+";
+
+const ITEM_MS: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee10";
+
+fn dashboard_path_for(output_dir: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(output_dir).join("pages").join("Dashboard.md")
+}
+
+#[test]
+fn test_r15_fresh_export_creates_dashboard_with_type_slugs() {
+    // HP: fresh export with recognized operational types → Dashboard.md created.
+    // Type slugs in queries are derived from canonical schema keys via type_to_logseq_tag.
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, DASHBOARD_SCHEMA_FULL);
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_MS, "milestone", "Q3 Release", None, None)],
+    );
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let dash = dashboard_path_for(&output_dir);
+    assert!(dash.exists(), "Dashboard.md must be created on fresh export with recognized types");
+    let content = fs::read_to_string(&dash).unwrap();
+    assert!(
+        content.contains("\"milestone\""),
+        "Dashboard must contain 'milestone' type slug (from Milestone canonical key), got:\n{}",
+        content
+    );
+    assert!(
+        content.contains("\"work-package\""),
+        "Dashboard must contain 'work-package' type slug (from WorkPackage canonical key), got:\n{}",
+        content
+    );
+}
+
+#[test]
+fn test_r15_dashboard_not_overwritten_when_already_exists() {
+    // HP: pre-existing Dashboard.md → not modified by export (custom content preserved).
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, DASHBOARD_SCHEMA_FULL);
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_MS, "milestone", "Q3 Release", None, None)],
+    );
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    let pages_dir = std::path::PathBuf::from(&output_dir).join("pages");
+    fs::create_dir_all(&pages_dir).unwrap();
+    let dash = pages_dir.join("Dashboard.md");
+    let custom = "custom-dashboard-content-that-must-not-be-overwritten";
+    fs::write(&dash, custom).unwrap();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let after = fs::read_to_string(&dash).unwrap();
+    assert_eq!(after, custom, "Pre-existing Dashboard.md must not be modified by export");
+}
+
+#[test]
+fn test_r15_dashboard_section_omitted_for_absent_schema_type() {
+    // HP: schema without Milestone → no Pending Milestones section in Dashboard.
+    // Other sections for present types are still generated.
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, DASHBOARD_SCHEMA_NO_MILESTONE);
+    const ITEM_WP_DASH: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee11";
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_WP_DASH, "workpackage", "Beta Sprint", None, None)],
+    );
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let dash = dashboard_path_for(&output_dir);
+    assert!(dash.exists(), "Dashboard.md must be created when at least one operational type present");
+    let content = fs::read_to_string(&dash).unwrap();
+    assert!(
+        !content.contains("Pending Milestones"),
+        "Dashboard must NOT contain Milestone section when Milestone absent from schema"
+    );
+    assert!(
+        content.contains("\"work-package\""),
+        "Dashboard must still contain WorkPackage section when WorkPackage present, got:\n{}",
+        content
+    );
+}
+
+#[test]
+fn test_r15_no_dashboard_when_no_recognized_operational_types() {
+    // Boundary: schema with no recognized operational types → no Dashboard.md written.
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, DASHBOARD_SCHEMA_NO_OP_TYPES);
+    const ITEM_CUSTOM: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee12";
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_CUSTOM, "CustomType", "Some Custom Item", None, None)],
+    );
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let dash = dashboard_path_for(&output_dir);
+    assert!(
+        !dash.exists(),
+        "Dashboard.md must NOT be created when no recognized operational types are in the schema"
+    );
+}
+
+#[test]
+fn test_r15_dashboard_type_slug_derived_from_schema_not_hardcoded() {
+    // Falsification: schema with "Workstream" pageType aliased as "workpackage".
+    // Dashboard must use "workstream" (from canonical key), not the hardcoded "work-package".
+    // Falsifies: implementation that hardcodes "work-package" in the WP query.
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, DASHBOARD_SCHEMA_WORKSTREAM);
+    const ITEM_WS: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee13";
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_WS, "workpackage", "Q3 Workstream", None, None)],
+    );
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let dash = dashboard_path_for(&output_dir);
+    assert!(dash.exists(), "Dashboard.md must be created");
+    let content = fs::read_to_string(&dash).unwrap();
+    assert!(
+        content.contains("\"workstream\""),
+        "Dashboard must use 'workstream' from Workstream canonical key, got:\n{}",
+        content
+    );
+    assert!(
+        !content.contains("\"work-package\""),
+        "Dashboard must NOT contain hardcoded 'work-package' when canonical key is Workstream, got:\n{}",
+        content
+    );
+}
+
+#[test]
+fn test_r15_reexport_does_not_overwrite_dashboard() {
+    // HP Idempotent re-export: Dashboard.md once created is not overwritten on re-export.
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, DASHBOARD_SCHEMA_FULL);
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_MS, "milestone", "Q3 Release", None, None)],
+    );
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+    let dash = dashboard_path_for(&output_dir);
+    assert!(dash.exists(), "Dashboard.md must exist after first export");
+
+    let custom = "custom-content-written-after-first-export";
+    fs::write(&dash, custom).unwrap();
+
+    run_binary_isolated(&dir, &output_dir);
+    let after = fs::read_to_string(&dash).unwrap();
+    assert_eq!(after, custom, "Re-export must not overwrite Dashboard.md");
+}
+
+#[test]
+fn test_r15_stale_page_deletion_preserves_dashboard() {
+    // Dashboard.md is exempt from stale page deletion (it is never an item page).
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, DASHBOARD_SCHEMA_FULL);
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_MS, "milestone", "Q3 Release", None, None)],
+    );
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+    let dash = dashboard_path_for(&output_dir);
+    assert!(dash.exists(), "Dashboard.md must exist after first export");
+
+    run_binary_isolated(&dir, &output_dir);
+    assert!(
+        dash.exists(),
+        "Dashboard.md must NOT be deleted by stale page cleanup on re-export"
+    );
+}
+
+// ── F16: Extraction-sourced WP task attribution ───────────────────────────────
+
+const SESSION_F16: &str = "f1600000-0000-0000-0000-000000000001";
+const TASK_EXTRACTED: &str = "20000001-0000-0000-0000-000000000001";
+
+/// Seed ItemsExtracted + ExtractionConfirmed + ItemsIncorporated for items that
+/// include per-item F16 fields (parent_item_id, initial_marker).
+/// Tuple: (id, item_type, description, proposed_status, proposed_priority, parent_item_id, initial_marker)
+fn seed_extracted_items_f16(
+    dir: &TempDir,
+    session_id: &str,
+    items: &[(&str, &str, &str, Option<&str>, Option<&str>, Option<&str>, Option<&str>)],
+) {
+    let items_json: Vec<Value> = items
+        .iter()
+        .map(|(id, typ, desc, ps, pp, pid, im)| {
+            json!({
+                "item_id": id,
+                "item_type": typ,
+                "description": desc,
+                "uncertain": false,
+                "uncertainty_reason": null,
+                "proposed_status": ps,
+                "proposed_priority": pp,
+                "parent_item_id": pid,
+                "initial_marker": im,
+            })
+        })
+        .collect();
+
+    let accepted_ids: Vec<&str> = items.iter().map(|(id, ..)| *id).collect();
+    let n = items.len();
+
+    let path = dir.path().join("events/runtime_events.jsonl");
+    let mut file = fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
+    writeln!(file, "{}", json!({
+        "event_id":       format!("f16-ext-{}", &session_id[..8]),
+        "event_type":     "ItemsExtracted",
+        "timestamp":      1748200001000u64,
+        "correlation_id": session_id,
+        "source_module":  "pm_structuring",
+        "payload": { "items": items_json, "item_count": n, "uncertain_count": 0u64 }
+    })).unwrap();
+    writeln!(file, "{}", json!({
+        "event_id":       format!("f16-conf-{}", &session_id[..8]),
+        "event_type":     "ExtractionConfirmed",
+        "timestamp":      1748200002000u64,
+        "correlation_id": session_id,
+        "source_module":  "pm_structuring",
+        "payload": { "accepted_item_ids": accepted_ids, "accepted_count": n }
+    })).unwrap();
+    writeln!(file, "{}", json!({
+        "event_id":       format!("f16-inc-{}", &session_id[..8]),
+        "event_type":     "ItemsIncorporated",
+        "timestamp":      1748200003000u64,
+        "correlation_id": "00000000-0000-0000-0000-00000000f160",
+        "source_module":  "project_state",
+        "payload": {
+            "session_id": session_id,
+            "incorporated_count": n,
+            "total_record_size": n,
+        }
+    })).unwrap();
+}
+
+#[test]
+fn test_f16_extraction_task_with_parent_id_renders_as_nested_block() {
+    // HP5: extraction-sourced task with parent_item_id is rendered as a nested
+    // task block under the WP page, not as a separate page.
+    // This directly falsifies the Stage 0 gap where ..Default::default() lost parent_item_id.
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_WP, "work_package", "Platform Integration", None, None)],
+    );
+    seed_extracted_items_f16(
+        &dir, SESSION_F16,
+        &[(TASK_EXTRACTED, "task_block", "Set up CI pipeline",
+           None, None, Some(ITEM_WP), Some("TODO"))],
+    );
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let wp_content = fs::read_to_string(page_path(&output_dir, "platform-integration"))
+        .expect("WP page must exist");
+    assert!(
+        wp_content.contains("TODO") && wp_content.contains("Set up CI pipeline"),
+        "WP page must contain the extraction-attributed task block, got:\n{}",
+        wp_content
+    );
+    assert!(
+        wp_content.contains(":task-id:"),
+        "Nested task block must have a :PROPERTIES: drawer with :task-id:, got:\n{}",
+        wp_content
+    );
+
+    let task_slug = description_to_slug("Set up CI pipeline");
+    assert!(
+        !page_path(&output_dir, &task_slug).exists(),
+        "Extraction task with parent_item_id must NOT be written as a separate page"
+    );
+}
+
+#[test]
+fn test_f16_extraction_task_uses_initial_marker_in_block_line() {
+    // HP6: initial_marker from the ItemsExtracted payload is used in the task block line.
+    // Confirms that initial_marker read from find_confirmed_items is forwarded to rendering.
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_WP, "work_package", "Sprint Beta", None, None)],
+    );
+    seed_extracted_items_f16(
+        &dir, SESSION_F16,
+        &[(TASK_EXTRACTED, "task_block", "Write API documentation",
+           None, None, Some(ITEM_WP), Some("DOING"))],
+    );
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let wp_content = fs::read_to_string(page_path(&output_dir, "sprint-beta"))
+        .expect("WP page must exist");
+    assert!(
+        wp_content.contains("DOING Write API documentation"),
+        "Task block line must use the initial_marker 'DOING' from ItemsExtracted payload, got:\n{}",
+        wp_content
+    );
+}
+
+#[test]
+fn test_f16_extraction_task_without_parent_id_not_rendered_as_page() {
+    // HP3: extraction task with no parent_item_id is a blockType item with no parent →
+    // not rendered as a Logseq page (it stays in the project record as an orphan task).
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_extracted_items_f16(
+        &dir, SESSION_F16,
+        &[(TASK_EXTRACTED, "task_block", "Orphan unassigned task",
+           None, None, None, Some("TODO"))],
+    );
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let task_slug = description_to_slug("Orphan unassigned task");
+    assert!(
+        !page_path(&output_dir, &task_slug).exists(),
+        "Orphan extraction task (blockType, no parent_item_id) must NOT be exported as a page"
+    );
+}
+
+#[test]
+fn test_f16_parent_item_id_survives_extraction_confirmation_flow() {
+    // Boundary: parent_item_id is propagated through the full extraction flow
+    // (ItemsExtracted → ExtractionConfirmed → find_confirmed_items → export routing).
+    // If lost at find_confirmed_items, the task block would not appear nested.
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_incorporated_items(
+        &dir, SESSION_A,
+        &[(ITEM_WP, "work_package", "Backend Platform", None, None)],
+    );
+    seed_extracted_items_f16(
+        &dir, SESSION_F16,
+        &[(TASK_EXTRACTED, "task_block", "Implement auth service",
+           None, None, Some(ITEM_WP), Some("TODO"))],
+    );
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let wp_content = fs::read_to_string(page_path(&output_dir, "backend-platform"))
+        .expect("WP page must exist");
+    assert!(
+        wp_content.contains("Implement auth service"),
+        "parent_item_id must survive the extraction confirmation flow and produce a nested block, got:\n{}",
+        wp_content
+    );
+}
+
+#[test]
+fn test_f16_no_wp_page_created_for_unresolvable_reference() {
+    // Falsification: no WP page is auto-created when the WP is not in the project record.
+    // A task with no parent_item_id (unresolvable WP) must not cause a WP page to appear.
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, WP_SCHEMA);
+    seed_extracted_items_f16(
+        &dir, SESSION_F16,
+        &[(TASK_EXTRACTED, "task_block", "Implement notifications",
+           None, None, None, Some("TODO"))],
+    );
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+
+    run_binary_isolated(&dir, &output_dir);
+
+    let pages_dir = std::path::PathBuf::from(&output_dir).join("pages");
+    if pages_dir.exists() {
+        // Dashboard.md is legitimately generated by R15 — exclude it from the check.
+        // The invariant is that no WP *item* page is auto-created.
+        let item_pages: Vec<_> = fs::read_dir(&pages_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path().extension().and_then(|s| s.to_str()) == Some("md")
+                    && e.file_name().to_string_lossy() != "Dashboard.md"
+            })
+            .collect();
+        assert_eq!(
+            item_pages.len(), 0,
+            "No WP item page must be auto-created; found {} unexpected page(s)",
+            item_pages.len()
+        );
+    }
+}
+
+#[test]
+fn test_f16_task_and_wp_types_derived_from_schema_not_hardcoded() {
+    // HP7 falsification: schema with non-standard type names.
+    // "Workstream" pageType (alias "workpackage") + "action_item" blockType.
+    // Extraction task with parent_item_id must render nested under the Workstream page.
+    // Falsifies: hardcoded "task" or "work_package" type names in attribution logic.
+    const F16_HP7_SCHEMA: &str = "schemaVersion: 1
+pageTypes:
+  Workstream:
+    aliases: [workpackage]
+blockTypes:
+  action_item:
+    markers:
+      TODO: todo
+      DONE: done
+";
+    const WS_ID:      &str = "30000001-0000-0000-0000-000000000001";
+    const AI_ID:      &str = "30000001-0000-0000-0000-000000000002";
+    const SESSION_WS: &str = "f1600000-0000-0000-0000-000000000006";
+    const SESSION_AI: &str = "f1600000-0000-0000-0000-000000000007";
+
+    let dir = setup_temp_dir();
+    write_schema_file(&dir, F16_HP7_SCHEMA);
+
+    seed_extracted_items_f16(
+        &dir, SESSION_WS,
+        &[(WS_ID, "workpackage", "Core Infrastructure", None, None, None, None)],
+    );
+    seed_extracted_items_f16(
+        &dir, SESSION_AI,
+        &[(AI_ID, "action_item", "Deploy monitoring stack",
+           None, None, Some(WS_ID), Some("TODO"))],
+    );
+
+    let output_dir = dir.path().join("logseq_out").to_string_lossy().into_owned();
+    run_binary_isolated(&dir, &output_dir);
+
+    let ws_content = fs::read_to_string(page_path(&output_dir, "core-infrastructure"))
+        .expect("Workstream page 'core-infrastructure' must exist");
+    assert!(
+        ws_content.contains("Deploy monitoring stack"),
+        "action_item must render as nested block under Workstream page (no hardcoded type names), got:\n{}",
+        ws_content
     );
 }

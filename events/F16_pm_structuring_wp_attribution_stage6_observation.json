@@ -1,0 +1,59 @@
+{
+  "stage": 6,
+  "feature": "F16",
+  "description": "Observe: pm_structuring WP attribution — parent_item_id and initial_marker in extracted task items",
+  "observation_date": "2026-06-14",
+  "setup": {
+    "schema": "production project-schema.yaml (extends default-schema.yaml)",
+    "pre_seeded_wp": {
+      "item_id": "wp000000-0000-0000-0000-000000000001",
+      "item_type": "WorkPackage",
+      "description": "Platform Integration",
+      "incorporated_via": "ItemsIncorporated (event_type fixed: was incorrectly reading 'SessionIncorporated')"
+    },
+    "input_text": "## Platform Integration\n\n- Set up CI pipeline for automated builds\n- Write API documentation for external developers\n- Configure monitoring alerts for production services"
+  },
+  "bug_fixed_during_stage6": {
+    "file": "modules/pm_structuring/src/main.rs",
+    "function": "read_wp_items",
+    "issue": "Checked event_type == 'SessionIncorporated' but project_state emits 'ItemsIncorporated'",
+    "fix": "Changed to event_type == 'ItemsIncorporated'"
+  },
+  "observed_itemsextracted_event": {
+    "correlation_id": "cd15894d-df8d-4a42-809f-609af55d1b83",
+    "event_type": "ItemsExtracted",
+    "items": [
+      {
+        "description": "Set up CI pipeline for automated builds",
+        "item_type": "task",
+        "parent_item_id": "wp000000-0000-0000-0000-000000000001",
+        "initial_marker": "CANCELLED"
+      },
+      {
+        "description": "Write API documentation for external developers",
+        "item_type": "task",
+        "parent_item_id": "wp000000-0000-0000-0000-000000000001",
+        "initial_marker": "CANCELLED"
+      },
+      {
+        "description": "Configure monitoring alerts for production services",
+        "item_type": "task",
+        "parent_item_id": "wp000000-0000-0000-0000-000000000001",
+        "initial_marker": "CANCELLED"
+      }
+    ]
+  },
+  "contract_conformance": {
+    "parent_item_id_set": "PASS — all task items reference the WP UUID",
+    "item_type_blocktype": "PASS — item_type is 'task' (blockType canonical, not 'Task' pageType)",
+    "wp_item_unmodified": "PASS — WP item has parent_item_id: null, initial_marker: null",
+    "initial_marker_populated": "PASS — field present and non-null for all task items"
+  },
+  "anomaly_noted": {
+    "issue": "initial_marker is 'CANCELLED' for all task items",
+    "cause": "Default marker is alphabetically first over production schema markers: CANCELLED, DOING, DONE, TODO, WAITING",
+    "severity": "LOW — matches task_model behavior exactly (same alphabetical-sort logic)",
+    "mitigation": "Schema marker naming (C, D, D, T, W) puts CANCELLED first. Pre-existing task_model behavior. Noting for Stage 7 Reconcile.",
+    "f16_conformance": "PASS — behavior matches contract (alphabetical-first marker, matching task_model)"
+  }
+}
