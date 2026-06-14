@@ -40,8 +40,9 @@ See `.codeos/templates/conventions.md`.
 - emitted when: all items from the project record have been successfully written as Logseq pages
 - payload:
   - `output_dir`: `string` — path to the Logseq output directory written to
-  - `item_count`: `u32` — number of items exported
+  - `item_count`: `u32` — number of items exported (recognized types only)
   - `pages_written`: `array<string>` — list of page file paths written
+  - `items_excluded_type_unknown`: `u32` — number of items skipped because their type was not recognized by the loaded schema (added R10)
 
 ### ExportFailedEmptyRecord
 
@@ -99,5 +100,6 @@ status: APPROVED
 feature_id: logseq_export
 approved_by: human
 approved_at: 2026-05-25
+refined_at: 2026-06-14 (R15: no schema changes — Dashboard.md is a file artifact, not an event)
 derived_from_intent: intents/logseq_export.md
 derived_from_contract: contracts/logseq_export_contract.md
