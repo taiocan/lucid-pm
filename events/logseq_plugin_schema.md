@@ -15,14 +15,15 @@ the feedback states it presents to the PM, and the configuration it persists.
 
 ## Registered Commands
 
-The plugin registers Sync, Export, and Suggest commands with Logseq Desktop at
-load time. Extract is not registered.
+The plugin registers Sync, Export, Suggest, and Extract commands with Logseq
+Desktop at load time.
 
 | Function | Required | Notes |
 |---|---|---|
 | Sync | Yes | Invokes `lucid sync` against the active project |
 | Export | Yes | Invokes `lucid export` against the active project |
 | Suggest | Yes | Invokes `lucid suggest` against the active project |
+| Extract | Yes | Invokes `lucid extract --yes` against the currently open journal page (R13) |
 
 ---
 
@@ -43,6 +44,10 @@ Shown when the delegated `lucid` command exits with code 0.
 
 Constraint: `content` must provide enough information for the PM to distinguish
 successful completion from an execution error.
+
+Constraint (Export): for Export commands, `content` also includes the next step
+required before exported pages become visible in Logseq. This constraint is
+never omitted regardless of the content of the delegated command's output.
 
 ### FailureIndication
 
@@ -108,13 +113,13 @@ by the delegated `lucid` commands and are governed by their own schemas:
 | Sync | `lucid sync` | events/logseq_sync_schema.md |
 | Export | `lucid export` | events/logseq_export_schema.md |
 | Suggest | `lucid suggest` | events/ontology_suggest_schema.md |
+| Extract | `lucid extract --yes` | events/R13_logseq_plugin_extract_schema.md |
 
 ---
 
 ## Schema Invariants
 
-- Sync, Export, and Suggest commands are registered at plugin load time;
-  Extract is not registered
+- Sync, Export, Suggest, and Extract commands are registered at plugin load time
 - The three feedback states (SuccessIndication, FailureIndication, ErrorMessage)
   are mutually exclusive per invocation
 - A PM observing the interface can determine whether a command succeeded, failed,
@@ -133,4 +138,5 @@ status: APPROVED
 feature_id: logseq_plugin
 approved_by: human
 approved_at: 2026-06-09
+refined_at: 2026-06-14 (R14 Stage 9: Extract added to Registered Commands; pre-existing R13 schema drift corrected)
 derived_from_contract: contracts/logseq_plugin_contract.md

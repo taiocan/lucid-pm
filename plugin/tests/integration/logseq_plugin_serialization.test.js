@@ -13,13 +13,15 @@ jest.mock('child_process', () => ({})); // no exec → getChildProcess() returns
 
 function startCaptureServer(respond = () => ({ ok: true, output: 'captured.' })) {
   return new Promise((resolve) => {
-    let lastPayload = null;
+    let payloads = [];
     const server = http.createServer((req, res) => {
       let body = '';
       req.on('data', c => (body += c));
       req.on('end', () => {
-        try { lastPayload = JSON.parse(body); } catch (_) { lastPayload = null; }
-        const reply = respond(lastPayload);
+        let parsed = null;
+        try { parsed = JSON.parse(body); } catch (_) {}
+        payloads.push(parsed);
+        const reply = respond(parsed);
         const data  = typeof reply === 'string' ? reply : JSON.stringify(reply);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(data);
@@ -27,9 +29,11 @@ function startCaptureServer(respond = () => ({ ok: true, output: 'captured.' }))
     });
     server.listen(0, '127.0.0.1', () => {
       resolve({
-        port:          server.address().port,
-        close:         () => new Promise(r => server.close(r)),
-        getLastPayload: () => lastPayload,
+        port:           server.address().port,
+        close:          () => new Promise(r => server.close(r)),
+        getLastPayload: () => payloads[payloads.length - 1] ?? null,
+        getPayloads:    () => [...payloads],
+        clearPayloads:  () => { payloads = []; },
       });
     });
   });
@@ -46,7 +50,10 @@ beforeAll(async () => {
 
   global.logseq = {
     ready:              jest.fn((fn) => fn()),
-    Editor:             { registerSlashCommand: jest.fn((name, cb) => { registeredCommands[name] = cb; }) },
+    Editor: {
+      registerSlashCommand: jest.fn((name, cb) => { registeredCommands[name] = cb; }),
+      getCurrentPage:       jest.fn(),
+    },
     UI:                 { showMsg: jest.fn() },
     App:                { getCurrentGraph: jest.fn() },
     useSettingsSchema:  jest.fn(),
@@ -65,6 +72,11 @@ beforeEach(() => {
   jest.clearAllMocks();
   global.logseq.settings = {};
   logseq.App.getCurrentGraph.mockResolvedValue({ path: '/test/project' });
+  logseq.Editor.getCurrentPage.mockResolvedValue({
+    'journal?':   true,
+    originalName: 'Jun 13th, 2026',
+    file:         { path: '/test/project/journals/2026_06_13.md' },
+  });
 });
 
 // ── [HP1] Sync payload ───────────────────────────────────────────────────────
@@ -86,7 +98,7 @@ test('[HP2] export payload shape matches server contract', async () => {
 
   const payload = captureServer.getLastPayload();
   expect(payload).toEqual({
-    args:    ['export', '--output-dir', 'logseq/pages'],
+    args:    ['export', '--output-dir', 'logseq'],
     project: '/test/project',
   });
 });
@@ -113,6 +125,48 @@ test('[HP5] explicit_project_path overrides graph path in payload', async () => 
   const payload = captureServer.getLastPayload();
   expect(payload.project).toBe('/explicit/path');
   expect(logseq.App.getCurrentGraph).not.toHaveBeenCalled();
+});
+
+// ── [R13-HP1] Extract payload ────────────────────────────────────────────────
+// These tests run before OP1 which closes the capture server.
+// Extract sends two requests: first the extract call, then incorporate-latest.
+
+test('[R13-HP1] extract payload shape matches server contract', async () => {
+  captureServer.clearPayloads();
+  await registeredCommands['LucidPM Extract']();
+
+  const payloads = captureServer.getPayloads();
+  expect(payloads[0]).toMatchObject({
+    args:       ['extract', '--yes'],
+    project:    '/test/project',
+    stdin_file: '/test/project/journals/2026_06_13.md',
+  });
+  expect(payloads[1]).toMatchObject({
+    args:    ['state', 'incorporate-latest'],
+    project: '/test/project',
+  });
+});
+
+test('[R13-HP1] extract success message shown when server returns ok:true', async () => {
+  await registeredCommands['LucidPM Extract']();
+
+  expect(logseq.UI.showMsg).toHaveBeenCalledWith(
+    expect.any(String), 'success', expect.any(Object),
+  );
+});
+
+// ── [R13-INV-2] CLI stdin equivalence ────────────────────────────────────────
+// Correct implementation sends the journal file path as `stdin_file` (the server reads it).
+// Wrong implementation would read the file client-side and send inline content instead.
+
+test('[R13-INV-2] test_cli_stdin_equivalence_falsifies_inline_content_transform', async () => {
+  captureServer.clearPayloads();
+  await registeredCommands['LucidPM Extract']();
+
+  const extractPayload = captureServer.getPayloads()[0];
+  expect(extractPayload).toHaveProperty('stdin_file', '/test/project/journals/2026_06_13.md');
+  expect(extractPayload).not.toHaveProperty('content');
+  expect(extractPayload).not.toHaveProperty('stdin');
 });
 
 // ── [OP1] Endpoint unavailable ───────────────────────────────────────────────
@@ -151,5 +205,34 @@ test('[OP3] server returns malformed JSON → invalid server response shown', as
   );
 
   await badServer.close();
+  process.env.LUCID_SERVER_PORT = String(captureServer.port);
+});
+
+// ── [R13-HP2] Extract no-items response ──────────────────────────────────────
+
+test('[R13-HP2] no-items server response → warning notification', async () => {
+  const noItemsServer = await startCaptureServer(() => ({
+    ok:     true,
+    output: 'No project management elements were found in the provided text.',
+  }));
+  process.env.LUCID_SERVER_PORT = String(noItemsServer.port);
+
+  const cmds = {};
+  global.logseq.Editor.registerSlashCommand = jest.fn((name, cb) => { cmds[name] = cb; });
+  jest.isolateModules(() => { require('../../src/index'); });
+  logseq.App.getCurrentGraph.mockResolvedValue({ path: '/test/project' });
+  logseq.Editor.getCurrentPage.mockResolvedValue({
+    'journal?':   true,
+    originalName: 'Jun 13th, 2026',
+    file:         { path: '/test/project/journals/2026_06_13.md' },
+  });
+
+  await cmds['LucidPM Extract']();
+
+  expect(logseq.UI.showMsg).toHaveBeenCalledWith(
+    expect.stringContaining('no items'), 'warning', expect.any(Object),
+  );
+
+  await noItemsServer.close();
   process.env.LUCID_SERVER_PORT = String(captureServer.port);
 });

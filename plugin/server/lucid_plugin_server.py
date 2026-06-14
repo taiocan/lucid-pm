@@ -43,18 +43,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
-        length   = int(self.headers.get('Content-Length', 0))
-        body     = json.loads(self.rfile.read(length))
-        project  = wsl_to_linux(body.get('project') or '') or None
-        args     = body.get('args', [])
+        length     = int(self.headers.get('Content-Length', 0))
+        body       = json.loads(self.rfile.read(length))
+        project    = wsl_to_linux(body.get('project') or '') or None
+        args       = body.get('args', [])
+        stdin_file = wsl_to_linux(body.get('stdin_file') or '') or None
+
+        stdin_input = None
+        if stdin_file:
+            try:
+                with open(stdin_file, 'r', encoding='utf-8') as f:
+                    stdin_input = f.read()
+            except OSError as exc:
+                data    = {'ok': False, 'output': str(exc)}
+                payload = json.dumps(data).encode()
+                self.send_response(200)
+                self.send_header('Content-Type',   'application/json')
+                self.send_header('Content-Length', str(len(payload)))
+                self._cors()
+                self.end_headers()
+                self.wfile.write(payload)
+                return
 
         cmd = ['lucid'] + args
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd=project)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, cwd=project, input=stdin_input,
+                timeout=58,
+            )
             data   = {
                 'ok':     result.returncode == 0,
                 'output': (result.stdout or result.stderr or '').strip(),
             }
+        except subprocess.TimeoutExpired:
+            data = {'ok': False, 'output': f'lucid command timed out after 58s: {" ".join(cmd)}'}
         except (FileNotFoundError, OSError) as exc:
             data = {'ok': False, 'output': str(exc)}
 

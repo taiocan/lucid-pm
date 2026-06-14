@@ -15,7 +15,7 @@ const path = require('path');
 
 const PRELOAD  = path.join(__dirname, 'preload.js');
 const RENDERER = `file://${path.join(__dirname, 'renderer.html')}`;
-const EXPECTED_COMMANDS = ['LucidPM Sync', 'LucidPM Export', 'LucidPM Suggest'];
+const EXPECTED_COMMANDS = ['LucidPM Sync', 'LucidPM Export', 'LucidPM Suggest', 'LucidPM Extract'];
 
 const SCENARIOS = [
   {

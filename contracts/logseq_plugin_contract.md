@@ -30,6 +30,8 @@ Then the plugin executes `lucid export` against the active project
 And the PM sees a success indication
 And the success indication provides enough information to distinguish successful
   completion from an execution error
+And the PM is informed of the next step required before exported pages become
+  visible in Logseq
 And no terminal or external application is opened
 ```
 
@@ -158,7 +160,6 @@ And the failure indication is visible without leaving Logseq Desktop
 - The plugin maintains no independent representation of LucidPM project state;
   all project state is owned exclusively by the LucidPM record
 - A succeeded command and a failed command never produce the same visible output
-- The plugin exposes Sync, Export, and Suggest commands; it does not expose `extract`
 - When an explicit project path is configured, it always takes precedence over
   the inferred graph path — there is no scenario in which inference overrides
   an explicit setting
@@ -166,6 +167,9 @@ And the failure indication is visible without leaving Logseq Desktop
   never silently proceeds without a resolved project
 - Executing a plugin command causes the same LucidPM operation to occur as invoking
   the equivalent `lucid` subcommand against the active project
+- A successful Export always informs the PM of the next step required before
+  exported pages appear in Logseq — this hint is never omitted, regardless of
+  the content of the `lucid export` output
 
 ## Preconditions
 
@@ -179,6 +183,8 @@ And the failure indication is visible without leaving Logseq Desktop
   from an execution error
 - If the command succeeded, project state reflects the operation as defined by
   the delegated command's own contract
+- If Export succeeded, the PM is informed of the next step required before
+  exported pages appear in Logseq
 
 ## Runtime Artifacts
 
@@ -208,7 +214,7 @@ status: APPROVED
 feature_id: logseq_plugin
 approved_by: human
 approved_at: 2026-06-09
-amended_at: 2026-06-10
-amendment: added OP1–OP4 operational path clauses; expanded LucidNotAvailable to cover companion server failure modes; added MalformedServerResponse failure class
+amended_at: 2026-06-13 (R14: Export next-step guidance in success indication)
+amendment: HP2 Export: added next-step postcondition; new invariant: Export always informs PM of next step; Postconditions: Export next-step added
 derived_from_intent: intents/logseq_plugin.md
 derived_event_schema: events/logseq_plugin_schema.md

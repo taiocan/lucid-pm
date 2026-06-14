@@ -13,11 +13,16 @@ Prerequisites:
 
 | # | Contract | Check | Expected | Result |
 |---|----------|-------|----------|--------|
-| 1 | HP6 | Type `/` inside an editor block | All three slash commands visible: **LucidPM Sync**, **LucidPM Export**, **LucidPM Suggest** | |
+| 1 | HP6 | Type `/` inside an editor block | All four slash commands visible: **LucidPM Sync**, **LucidPM Export**, **LucidPM Suggest**, **LucidPM Extract** | |
 | 2 | HP1 | Select **LucidPM Sync** from the `/` palette | Success notification appears; message contains lucid sync output | |
 | 3 | HP6 | Set `explicit_project_path`, restart Logseq, run **LucidPM Sync** | Command uses the restored path (not graph inference); sync succeeds — test BEHAVIOR, not settings file | |
+| 4 | R13-HP1 | Open a daily journal page; run **LucidPM Extract** | Success notification appears; notification mentions running **LucidPM Export** to surface items; output from `lucid extract` is visible | |
+| 5 | R13-HP2 | Open a journal page with no extractable content; run **LucidPM Extract** | Notification indicates no items were extracted (no Export guidance shown) | |
+| 6 | R13-FP1 | Navigate to a non-journal Logseq page; run **LucidPM Extract** | Error notification: page is not a journal page; no extraction performed | |
+| 7 | R13-FP2 | Open Logseq with no page selected; run **LucidPM Extract** | Error notification: no page is currently open | |
 
-All three must pass before updating Stage 6 artifact FP2 to VERIFIED.
+Items 1–3 must pass before updating Stage 6 artifact FP2 to VERIFIED.
+Items 4–7 must pass before updating R13 Stage 6 artifact to VERIFIED.
 
 Once passed, regenerate Stage 7:
 ```bash

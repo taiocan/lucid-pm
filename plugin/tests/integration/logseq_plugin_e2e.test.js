@@ -70,7 +70,10 @@ beforeAll(async () => {
 
   global.logseq = {
     ready:             jest.fn((fn) => fn()),
-    Editor:            { registerSlashCommand: jest.fn((name, cb) => { registeredCommands[name] = cb; }) },
+    Editor: {
+      registerSlashCommand: jest.fn((name, cb) => { registeredCommands[name] = cb; }),
+      getCurrentPage:       jest.fn(),
+    },
     UI:                { showMsg: jest.fn() },
     App:               { getCurrentGraph: jest.fn() },
     useSettingsSchema: jest.fn(),
@@ -90,6 +93,11 @@ beforeEach(() => {
   jest.clearAllMocks();
   global.logseq.settings = { explicit_project_path: DEMO_PROJECT };
   logseq.App.getCurrentGraph.mockResolvedValue({ path: DEMO_PROJECT });
+  logseq.Editor.getCurrentPage.mockResolvedValue({
+    'journal?':   true,
+    originalName: 'Jun 13th, 2026',
+    file:         { path: path.join(DEMO_PROJECT, 'journals', '2026_06_13.md') },
+  });
 });
 
 // ── [HP1] Sync: plugin result matches CLI exit code ───────────────────────────
@@ -126,7 +134,7 @@ const SKIP_SUGGEST = !process.env.GEMINI_API_KEY_PMCLI;
   '[HP3] suggest — plugin success type matches lucid CLI exit code',
   async () => {
     const cli = spawnSync('lucid', ['suggest', 'propose'], {
-      cwd: DEMO_PROJECT, env: lucidEnv(), encoding: 'utf8', timeout: 60_000,
+      cwd: DEMO_PROJECT, env: lucidEnv(), encoding: 'utf8', timeout: 120_000,
     });
 
     await registeredCommands['LucidPM Suggest']();
@@ -134,6 +142,7 @@ const SKIP_SUGGEST = !process.env.GEMINI_API_KEY_PMCLI;
     const [, type] = logseq.UI.showMsg.mock.calls[0];
     expect(type).toBe(cli.status === 0 ? 'success' : 'error');
   },
+  180_000,
 );
 
 // ── [HP4] Graph path inference used when no explicit config ───────────────────
@@ -224,4 +233,48 @@ test('[OP3] server returns malformed JSON → invalid server response shown', as
 
   await new Promise(r => badServer.close(r));
   process.env.LUCID_SERVER_PORT = String(serverPort);
+});
+
+// ── [R13-HP1] Extract: plugin result matches CLI stdin invocation ─────────────
+// Evidence: executes via real companion server + real lucid binary + real demo file.
+// Starts a fresh server because OP1 killed the original serverProcess.
+
+test('[R13-HP1] extract — plugin notification type matches lucid extract --yes < file exit code', async () => {
+  const r13Port    = await findFreePort();
+  const r13Process = spawn('python3', [SERVER_PY, String(r13Port)], {
+    env: lucidEnv(), stdio: 'ignore',
+  });
+  await waitForServer(r13Port);
+
+  const cmds = {};
+  global.logseq.Editor.registerSlashCommand = jest.fn((name, cb) => { cmds[name] = cb; });
+  process.env.LUCID_SERVER_PORT = String(r13Port);
+  jest.isolateModules(() => { require('../../src/index'); });
+
+  logseq.App.getCurrentGraph.mockResolvedValue({ path: DEMO_PROJECT });
+  logseq.Editor.getCurrentPage.mockResolvedValue({
+    'journal?':   true,
+    originalName: 'Jun 13th, 2026',
+    file:         { path: path.join(DEMO_PROJECT, 'journals', '2026_06_13.md') },
+  });
+
+  const journalFile = path.join(DEMO_PROJECT, 'journals', '2026_06_13.md');
+  const fileContent = require('fs').readFileSync(journalFile, 'utf8');
+
+  const cli = spawnSync('lucid', ['extract', '--yes'], {
+    cwd: DEMO_PROJECT, env: lucidEnv(), encoding: 'utf8', input: fileContent,
+  });
+
+  await cmds['LucidPM Extract']();
+
+  r13Process.kill();
+  process.env.LUCID_SERVER_PORT = String(serverPort);
+
+  const [, type] = logseq.UI.showMsg.mock.calls[0];
+  if (cli.status === 0) {
+    // Success exit: plugin shows 'success' (items extracted) or 'warning' (no items found)
+    expect(['success', 'warning']).toContain(type);
+  } else {
+    expect(type).toBe('error');
+  }
 });

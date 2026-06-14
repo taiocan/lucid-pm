@@ -1,0 +1,146 @@
+[
+  {
+    "contract_clause": "HP1",
+    "failure_class": null,
+    "status": "VERIFIED",
+    "layer": "L2a:behavioral + L4:e2e_contract",
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260613_R13/L2a:behavioral.log",
+    "note": "Behavioral: spawn args, cwd, stdin content, Export guidance, extraction output. e2e: real companion server + real lucid binary + real demo journal."
+  },
+  {
+    "contract_clause": "HP2",
+    "failure_class": null,
+    "status": "VERIFIED",
+    "layer": "L2a:behavioral + L2b:serialization",
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260613_R13/L2a:behavioral.log",
+    "note": "no-items string match and empty stdout both produce warning notification."
+  },
+  {
+    "contract_clause": "HP3",
+    "failure_class": null,
+    "status": "VERIFIED",
+    "layer": "L3:replay",
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260613_R13/L3:replay.log",
+    "note": "R13_extract_dispatch_is_deterministic: same page input produces same spawn args twice."
+  },
+  {
+    "contract_clause": "HP4",
+    "failure_class": null,
+    "status": "VERIFIED",
+    "layer": "L3:replay",
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260613_R13/L3:replay.log",
+    "note": "Covered by determinism test — same invocation pattern applies to new-content re-extraction."
+  },
+  {
+    "contract_clause": "Boundary",
+    "failure_class": null,
+    "status": "VERIFIED",
+    "layer": "L2a:behavioral",
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260613_R13/L2a:behavioral.log",
+    "note": "Empty journal page → warning notification, not error."
+  },
+  {
+    "contract_clause": "FP1",
+    "failure_class": "NotAJournalPage",
+    "status": "VERIFIED",
+    "layer": "L2a:behavioral",
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260613_R13/L2a:behavioral.log",
+    "note": "Non-journal page → error shown, no spawn invoked."
+  },
+  {
+    "contract_clause": "FP2",
+    "failure_class": "NoCurrentPage",
+    "status": "VERIFIED",
+    "layer": "L2a:behavioral",
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260613_R13/L2a:behavioral.log",
+    "note": "No current page → error shown, no spawn invoked."
+  },
+  {
+    "contract_clause": "FP3",
+    "failure_class": "ActiveProjectNotResolved",
+    "status": "VERIFIED",
+    "layer": "L2a:behavioral",
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260613_R13/L2a:behavioral.log",
+    "note": "No explicit path and no graph → error shown, no spawn invoked."
+  },
+  {
+    "contract_clause": "FP4",
+    "failure_class": "LucidNotAvailable",
+    "status": "MANUAL-PENDING",
+    "layer": "L6",
+    "evidence": null,
+    "note": "LucidNotAvailable observable via companion server as raw ENOENT message. Requires L6 manual test with lucid removed from PATH."
+  },
+  {
+    "contract_clause": "FP5",
+    "failure_class": "CommandFailed",
+    "status": "VERIFIED",
+    "layer": "L2a:behavioral",
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260613_R13/L2a:behavioral.log",
+    "note": "Non-zero exit → failure indication with stderr content; visually distinct from success."
+  },
+  {
+    "contract_clause": "OP1-OP3",
+    "failure_class": "CompanionServerUnavailable/Timeout/MalformedResponse",
+    "status": "VERIFIED",
+    "layer": "L2b:serialization + L4:e2e_contract",
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260613_R13/L2b:serialization.log",
+    "note": "Inherited from parent contract; same runViaServer path. Verified in parent feature Stage 6."
+  },
+  {
+    "contract_clause": "INV-1",
+    "failure_class": null,
+    "status": "VERIFIED",
+    "layer": "L2a:behavioral",
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260613_R13/L2a:behavioral.log",
+    "note": "R13-INV-1: second invocation reads page B's path, not page A's cached path."
+  },
+  {
+    "contract_clause": "INV-2",
+    "failure_class": null,
+    "status": "VERIFIED",
+    "layer": "L2b:serialization",
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260613_R13/L2b:serialization.log",
+    "note": "R13-INV-2: payload has stdin_file (not inline content); server reads file."
+  },
+  {
+    "contract_clause": "INV-3",
+    "failure_class": null,
+    "status": "VERIFIED",
+    "layer": "L2a:behavioral",
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260613_R13/L2a:behavioral.log",
+    "note": "R13-INV-3: date-named non-journal page triggers error via journal? API check, not name heuristic."
+  },
+  {
+    "contract_clause": "INV-4",
+    "failure_class": null,
+    "status": "VERIFIED",
+    "layer": "L2a:behavioral",
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260613_R13/L2a:behavioral.log",
+    "note": "R13-INV-4: Export guidance present in success notification even with very long output."
+  },
+  {
+    "contract_clause": "INV-5",
+    "failure_class": null,
+    "status": "MANUAL-PENDING",
+    "layer": "L6",
+    "evidence": null,
+    "note": "Plugin-never-modifies-data invariant requires real Logseq Desktop observation of project record state before and after invocation."
+  },
+  {
+    "contract_clause": "HP1–HP4 (real Logseq)",
+    "failure_class": null,
+    "status": "MANUAL-PENDING",
+    "layer": "L6",
+    "evidence": null,
+    "note": "ACCEPTANCE.md items 4–7. Minimum runtime evidence: 4 — must be observed in real Logseq Desktop."
+  },
+  {
+    "contract_clause": "L5.5",
+    "failure_class": null,
+    "status": "VERIFIED",
+    "layer": "L5.5:electron_harness",
+    "evidence": "/home/arc/projects/claude/LucidPM/logs/verify_20260613_R13/L5.5:electron_harness.log",
+    "note": "4/4 scenarios pass; all four commands (Sync, Export, Suggest, Extract) register without error."
+  }
+]

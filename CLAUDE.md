@@ -63,6 +63,8 @@ planned and in-progress work, the backlog is the authoritative source.
 | F16 (task_extraction) | WP-attributed task records from extraction: parent_item_id, schema-driven type resolution, default active marker, nested export render | 9 | COMPLETE |
 | R16 (logseq_export) | suppress TBD placeholder owner in task block lines: owner wiki-link iff named stakeholder; is_assigned predicate | 9 | COMPLETE |
 | R15 (logseq_export) | schema-driven Dashboard.md generation: query blocks for recognized operational types; never overwritten | 9 | COMPLETE |
+| R13 (logseq_plugin) | Extract slash command: extracts current journal page via direct mode or companion server; auto-incorporates on success | 9 | COMPLETE |
+| R14 (logseq_plugin) | workflow step guidance in success messages: Extract hints incorporate-latest; Export hints re-index graph | 9 | COMPLETE |
 
 Stages: 1-Intent / 2-Contract / 3-Schema / 4-Implement / 5-Tests / 6-Observe / 7-Reconcile / 8-Replay / 9-Refine
 

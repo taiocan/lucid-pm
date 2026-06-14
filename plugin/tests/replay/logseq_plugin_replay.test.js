@@ -8,10 +8,29 @@
 'use strict';
 
 jest.mock('child_process', () => ({
-  exec: jest.fn(),
+  exec:  jest.fn(),
+  spawn: jest.fn(),
 }));
 
-const { exec } = require('child_process');
+jest.mock('fs', () => ({
+  readFileSync: jest.fn(),
+}));
+
+const { EventEmitter } = require('events');
+const { exec, spawn } = require('child_process');
+const fs              = require('fs');
+
+function mockChildProcess({ exitCode = 0, stdout = '' } = {}) {
+  const proc  = new EventEmitter();
+  proc.stdout = new EventEmitter();
+  proc.stderr = new EventEmitter();
+  proc.stdin  = { write: jest.fn(), end: jest.fn() };
+  process.nextTick(() => {
+    if (stdout) proc.stdout.emit('data', stdout);
+    proc.emit('close', exitCode);
+  });
+  return proc;
+}
 
 const registeredCommands = {};
 
@@ -19,23 +38,31 @@ beforeAll(() => {
   global.logseq = {
     ready: jest.fn((fn) => fn()),
     Editor: {
-      registerSlashCommand: jest.fn((name, cb) => {
-        registeredCommands[name] = cb;
-      }),
+      registerSlashCommand: jest.fn((name, cb) => { registeredCommands[name] = cb; }),
+      getCurrentPage:       jest.fn(),
     },
-    UI:  { showMsg: jest.fn() },
-    App: { getCurrentGraph: jest.fn() },
+    UI:                { showMsg: jest.fn() },
+    App:               { getCurrentGraph: jest.fn() },
     useSettingsSchema: jest.fn(),
-    settings: {},
+    settings:          {},
   };
   jest.isolateModules(() => { require('../../src/index'); });
 });
+
+const REPLAY_JOURNAL = {
+  'journal?':   true,
+  originalName: 'Jun 13th, 2026',
+  file:         { path: '/replay/project/journals/2026_06_13.md' },
+};
 
 beforeEach(() => {
   jest.clearAllMocks();
   global.logseq.settings = {};
   logseq.App.getCurrentGraph.mockResolvedValue({ path: '/replay/project' });
+  logseq.Editor.getCurrentPage.mockResolvedValue(REPLAY_JOURNAL);
   exec.mockImplementation((_cmd, _opts, cb) => cb(null, 'output', ''));
+  fs.readFileSync.mockReturnValue('- journal content');
+  spawn.mockImplementation(() => mockChildProcess({ exitCode: 0, stdout: 'Extracted 1 item.' }));
 });
 
 // ── Determinism ──────────────────────────────────────────────────────────────
@@ -87,10 +114,11 @@ test('logseq_plugin_event_sequence_is_deterministic: suggest command dispatch', 
 // ── Registration Conformance ─────────────────────────────────────────────────
 // Verifies the observable interface schema: commands registered at load time.
 
-test('all three commands are registered when plugin loads', () => {
+test('all four commands are registered when plugin loads', () => {
   expect(registeredCommands).toHaveProperty('LucidPM Sync');
   expect(registeredCommands).toHaveProperty('LucidPM Export');
   expect(registeredCommands).toHaveProperty('LucidPM Suggest');
+  expect(registeredCommands).toHaveProperty('LucidPM Extract');
 });
 
 test('commands are registered exactly once at load time, not on demand', () => {
@@ -139,4 +167,42 @@ test('failure mode dispatch is deterministic: same absent project produces same 
   const [, secondType] = logseq.UI.showMsg.mock.calls[0];
 
   expect(secondType).toBe(firstType);
+});
+
+test('R13_extract_dispatch_is_deterministic: same page input produces same spawn args', async () => {
+  await registeredCommands['LucidPM Extract']();
+  const firstSpawnArgs = spawn.mock.calls[0].slice(0, 2); // [cmd, args]
+  const firstSpawnOpts = spawn.mock.calls[0][2];
+
+  jest.clearAllMocks();
+  logseq.App.getCurrentGraph.mockResolvedValue({ path: '/replay/project' });
+  logseq.Editor.getCurrentPage.mockResolvedValue(REPLAY_JOURNAL);
+  fs.readFileSync.mockReturnValue('- journal content');
+  spawn.mockImplementation(() => mockChildProcess({ exitCode: 0, stdout: 'Extracted 1 item.' }));
+
+  await registeredCommands['LucidPM Extract']();
+  const secondSpawnArgs = spawn.mock.calls[0].slice(0, 2);
+  const secondSpawnOpts = spawn.mock.calls[0][2];
+
+  expect(secondSpawnArgs).toEqual(firstSpawnArgs);
+  expect(secondSpawnOpts.cwd).toBe(firstSpawnOpts.cwd);
+});
+
+// ── R14: Export success message determinism ──────────────────────────────────
+
+test('R14_export_success_message_is_deterministic: same output produces same message including next-step hint', async () => {
+  exec.mockImplementation((_cmd, _opts, cb) => cb(null, 'Exported 5 pages.', ''));
+
+  await registeredCommands['LucidPM Export']();
+  const firstMessage = logseq.UI.showMsg.mock.calls[0][0];
+
+  jest.clearAllMocks();
+  logseq.App.getCurrentGraph.mockResolvedValue({ path: '/replay/project' });
+  exec.mockImplementation((_cmd, _opts, cb) => cb(null, 'Exported 5 pages.', ''));
+
+  await registeredCommands['LucidPM Export']();
+  const secondMessage = logseq.UI.showMsg.mock.calls[0][0];
+
+  expect(secondMessage).toBe(firstMessage);
+  expect(firstMessage).toContain('Re-index Logseq graph');
 });
